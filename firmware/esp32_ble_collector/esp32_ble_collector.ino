@@ -1,10 +1,12 @@
 /*
- * Ingestive Particle Collector - ESP32 BLE UART Firmware
+ * Ingestive Particle Collector - ESP32 Resistance Telemetry & Vacuum Controller
  * 
- * Provides continuous wireless telemetry to the Web Bluetooth dashboard,
- * freeing the Arduino IDE serial port from lockups and buffer conflicts.
- * 
- * Uses standard Nordic UART Service (NUS) compatible with Web Bluetooth.
+ * Hardware Features:
+ * - Voltage divider resistance sensing on collector circuit.
+ * - Autonomous task completion when circuit resistance exceeds threshold (default 1,000 Ω).
+ * - Physical Green & Red status LEDs tracking sensing state and threshold cutoff.
+ * - 5-level PWM vacuum power motor control.
+ * - Nordic UART Service (NUS) Web Bluetooth communication.
  */
 
 #include <BLEDevice.h>
@@ -14,7 +16,31 @@
 
 #define DEVICE_NAME "ParticleCollector-ESP32"
 
-// Nordic UART Service (NUS) UUIDs
+// --- Hardware Pin Configuration ---
+#define GREEN_LED_PIN       18   // Status LED: Green (Sensing Active / Normal)
+#define RED_LED_PIN         19   // Status LED: Red (Threshold Reached / Cutoff)
+#define VACUUM_PWM_PIN      23   // Vacuum Motor PWM Drive
+#define RESISTANCE_ADC_PIN  34   // Analog Pin for Collector Circuit Voltage Divider
+
+// PWM Channel configuration (LEDC)
+#define PWM_CHANNEL         0
+#define PWM_FREQ_HZ         5000
+#define PWM_RESOLUTION_BITS 8
+
+// --- Circuit Constants ---
+const float KNOWN_R_REF = 1000.0; // Known reference resistor in divider (e.g. 1,000 Ω)
+const float V_SUPPLY    = 3.3;    // ESP32 ADC supply reference voltage
+
+// --- Operational State ---
+bool systemPowered       = false;
+bool sensingActive       = false;
+int vacuumLevel          = 1;      // 1 to 5
+float currentResistance  = 0.0;    // Ohms
+float resistanceThreshold = 1000.0; // Cutoff target (1 kΩ)
+String ledState          = "OFF";  // "OFF", "GREEN", "RED"
+bool taskCompleted       = false;
+
+// --- BLE UUIDs (Nordic UART Service) ---
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E" // ESP32 receives commands
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E" // ESP32 sends telemetry
@@ -24,121 +50,220 @@ BLECharacteristic *pTxCharacteristic = NULL;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
 
-// Collector Telemetry Variables
-uint32_t cumulativeParticles = 0;
-float instantaneousConc = 0.0; // particles / mL
-float fluidFlowRate = 12.0;    // mL / min
-float opticalSensorVolts = 3.3;
-bool samplingActive = true;
-
-// Non-blocking timer for telemetry transmission (e.g. 5 Hz / 200ms)
+// Telemetry transmit interval (4 Hz = 250ms)
 unsigned long lastTelemetryTime = 0;
 const unsigned long TELEMETRY_INTERVAL_MS = 250;
 
-// BLE Server Callbacks
+// Forward declarations
+void updateActuators();
+float readCircuitResistance();
+void processCommand(String cmd);
+
+// --- BLE Callbacks ---
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     deviceConnected = true;
   }
-
   void onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
   }
 };
 
-// BLE Characteristic Callbacks for incoming Web commands
 class CommandCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) {
     String rxValue = pCharacteristic->getValue();
-
     if (rxValue.length() > 0) {
       rxValue.trim();
-      
-      // Echo command processing
-      if (rxValue.equalsIgnoreCase("START")) {
-        samplingActive = true;
-      } else if (rxValue.equalsIgnoreCase("STOP")) {
-        samplingActive = false;
-      } else if (rxValue.equalsIgnoreCase("TARE")) {
-        cumulativeParticles = 0;
-      }
+      processCommand(rxValue);
     }
   }
 };
 
 void setup() {
-  // Initialize BLE Device
-  BLEDevice::init(DEVICE_NAME);
+  Serial.begin(115200);
 
-  // Create BLE Server
+  // Configure LED pins
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(RED_LED_PIN, OUTPUT);
+  digitalWrite(GREEN_LED_PIN, LOW);
+  digitalWrite(RED_LED_PIN, LOW);
+
+  // Configure Vacuum Motor PWM
+  ledcSetup(PWM_CHANNEL, PWM_FREQ_HZ, PWM_RESOLUTION_BITS);
+  ledcAttachPin(VACUUM_PWM_PIN, PWM_CHANNEL);
+  ledcWrite(PWM_CHANNEL, 0); // initial 0% duty
+
+  // Initialize Web Bluetooth BLE
+  BLEDevice::init(DEVICE_NAME);
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
-  // Create BLE Service
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
-  // Create TX Characteristic (Notify web dashboard)
+  // TX characteristic (notify telemetry to web dashboard)
   pTxCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID_TX,
     BLECharacteristic::PROPERTY_NOTIFY
   );
   pTxCharacteristic->addDescriptor(new BLE2902());
 
-  // Create RX Characteristic (Receive web commands)
+  // RX characteristic (receive commands from web dashboard)
   BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID_RX,
     BLECharacteristic::PROPERTY_WRITE
   );
   pRxCharacteristic->setCallbacks(new CommandCallbacks());
 
-  // Start the BLE Service
   pService->start();
 
-  // Start Advertising
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06); // iPhone/Chrome connection helper
+  pAdvertising->setMinPreferred(0x06);
   pAdvertising->setMinPreferred(0x12);
   BLEDevice::startAdvertising();
+
+  Serial.println("ESP32 Ingestive Particle Collector BLE Online.");
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  // Transmit telemetry periodically over BLE
+  // Read resistance continuously
+  currentResistance = readCircuitResistance();
+
+  // --- Autonomous Task Completion Logic ---
+  // When sensing is active and resistance exceeds 1,000 Ω (or set threshold)
+  if (systemPowered && sensingActive && (currentResistance >= resistanceThreshold)) {
+    sensingActive = false;
+    taskCompleted = true;
+    ledState = "RED"; // Switch lights from GREEN to RED
+    updateActuators();
+    Serial.println("AUTONOMOUS CUTOFF: Threshold 1,000 Ohms exceeded! Lights switched to RED.");
+  }
+
+  // Periodic Telemetry Broadcast over Web Bluetooth
   if (deviceConnected && (currentMillis - lastTelemetryTime >= TELEMETRY_INTERVAL_MS)) {
     lastTelemetryTime = currentMillis;
 
-    if (samplingActive) {
-      // Replace this block with your actual sensor reading logic (e.g. analogRead from optical sensor)
-      // Example simulation of particle detection:
-      int detectedBurst = (random(0, 100) > 85) ? random(1, 4) : 0;
-      cumulativeParticles += detectedBurst;
-      instantaneousConc = (detectedBurst * 15.0) + (random(5, 20) / 10.0);
-      opticalSensorVolts = 2.5 + (instantaneousConc / 50.0);
+    // Send JSON telemetry packet
+    char payload[160];
+    snprintf(payload, sizeof(payload),
+      "{\"res\":%.1f,\"thresh\":%.0f,\"led\":\"%s\",\"power\":%d,\"sensing\":%d,\"vac\":%d}\n",
+      currentResistance,
+      resistanceThreshold,
+      ledState.c_str(),
+      systemPowered ? 1 : 0,
+      sensingActive ? 1 : 0,
+      vacuumLevel
+    );
 
-      // Format payload as JSON string
-      char payload[128];
-      snprintf(payload, sizeof(payload),
-        "{\"count\":%lu,\"conc\":%.2f,\"flow\":%.1f,\"volt\":%.2f}\n",
-        cumulativeParticles, instantaneousConc, fluidFlowRate, opticalSensorVolts
-      );
-
-      pTxCharacteristic->setValue((uint8_t*)payload, strlen(payload));
-      pTxCharacteristic->notify();
-    }
+    pTxCharacteristic->setValue((uint8_t*)payload, strlen(payload));
+    pTxCharacteristic->notify();
   }
 
-  // Handle Disconnection / Re-advertising cleanly
+  // Handle BLE Disconnection / Re-advertising cleanly
   if (!deviceConnected && oldDeviceConnected) {
-    delay(500); // give the bluetooth stack the chance to get things ready
-    pServer->startAdvertising(); // restart advertising so web dashboard can reconnect
+    delay(500);
+    pServer->startAdvertising();
     oldDeviceConnected = deviceConnected;
   }
-
-  // Handle Connection established
   if (deviceConnected && !oldDeviceConnected) {
     oldDeviceConnected = deviceConnected;
+  }
+}
+
+// --- Circuit Resistance Measurement Formula ---
+// Reads ADC voltage divider and calculates unknown collector resistance
+float readCircuitResistance() {
+  if (!systemPowered) return 0.0;
+
+  int rawAdc = analogRead(RESISTANCE_ADC_PIN);
+  float vOut = (rawAdc / 4095.0) * V_SUPPLY;
+
+  // Prevent divide-by-zero
+  if (vOut <= 0.02) return 0.0;
+  if (vOut >= V_SUPPLY - 0.02) return 50000.0; // High resistance saturation
+
+  // Formula for divider: R_sensor = R_ref * (V_supply / V_out - 1)
+  float rCalc = KNOWN_R_REF * ((V_SUPPLY / vOut) - 1.0);
+  if (rCalc < 0.0) rCalc = 0.0;
+  return rCalc;
+}
+
+// --- Actuator and LED Hardware State Controller ---
+void updateActuators() {
+  if (!systemPowered) {
+    digitalWrite(GREEN_LED_PIN, LOW);
+    digitalWrite(RED_LED_PIN, LOW);
+    ledcWrite(PWM_CHANNEL, 0);
+    ledState = "OFF";
+    return;
+  }
+
+  // Update Status LEDs
+  if (ledState == "GREEN") {
+    digitalWrite(GREEN_LED_PIN, HIGH);
+    digitalWrite(RED_LED_PIN, LOW);
+  } else if (ledState == "RED") {
+    digitalWrite(GREEN_LED_PIN, LOW);
+    digitalWrite(RED_LED_PIN, HIGH);
+  } else {
+    digitalWrite(GREEN_LED_PIN, LOW);
+    digitalWrite(RED_LED_PIN, LOW);
+  }
+
+  // Update Vacuum Motor PWM (Levels 1 to 5 = 20% to 100% duty)
+  if (sensingActive) {
+    int duty = (vacuumLevel * 255) / 5; // 51, 102, 153, 204, 255
+    ledcWrite(PWM_CHANNEL, duty);
+  } else {
+    ledcWrite(PWM_CHANNEL, 0); // Motor idle when not sensing
+  }
+}
+
+// --- Process Bidirectional Commands from Web App ---
+void processCommand(String cmd) {
+  cmd.toUpperCase();
+  Serial.print("BLE RX Command: ");
+  Serial.println(cmd);
+
+  if (cmd == "POWER:ON") {
+    systemPowered = true;
+    updateActuators();
+  } else if (cmd == "POWER:OFF") {
+    systemPowered = false;
+    sensingActive = false;
+    updateActuators();
+  } else if (cmd == "SENSE:START") {
+    if (systemPowered) {
+      sensingActive = true;
+      taskCompleted = false;
+      ledState = "GREEN"; // Switch lights to GREEN upon sensing
+      updateActuators();
+    }
+  } else if (cmd == "SENSE:STOP") {
+    sensingActive = false;
+    if (!taskCompleted) {
+      ledState = "OFF";
+    }
+    updateActuators();
+  } else if (cmd.startsWith("VAC:")) {
+    int lvl = cmd.substring(4).toInt();
+    if (lvl >= 1 && lvl <= 5) {
+      vacuumLevel = lvl;
+      updateActuators();
+    }
+  } else if (cmd == "TARE") {
+    taskCompleted = false;
+    if (systemPowered) {
+      ledState = sensingActive ? "GREEN" : "OFF";
+    }
+    updateActuators();
+  } else if (cmd.startsWith("SET_THRESH:")) {
+    float val = cmd.substring(11).toFloat();
+    if (val > 0) {
+      resistanceThreshold = val;
+    }
   }
 }

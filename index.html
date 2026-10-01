@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Ingestive Particle Collector | ESP32 BLE Dashboard</title>
-  <meta name="description" content="Real-time Web Bluetooth telemetry dashboard and control interface for ESP32-powered Ingestive Particle Collector." />
+  <title>Ingestive Particle Collector | Autonomous Telemetry & Vacuum Control</title>
+  <meta name="description" content="Autonomous Web Bluetooth telemetry dashboard for Ingestive Particle Collector. Monitors circuit resistance over time, vacuum power levels (1-5), and physical status LEDs with automatic 1k-ohm cutoff." />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -17,33 +17,40 @@
       <div class="brand">
         <div class="brand-icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="9" />
-            <circle cx="8" cy="9" r="1.5" fill="currentColor" />
-            <circle cx="15" cy="8" r="2" fill="currentColor" />
-            <circle cx="13" cy="15" r="2.5" fill="currentColor" />
-            <path d="M12 3v3M12 18v3M3 12h3M18 12h3" stroke-linecap="round" />
+            <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </div>
         <div>
           <h1 class="brand-title">Ingestive Particle Collector</h1>
-          <span class="brand-subtitle">ESP32 Web Bluetooth Lab Telemetry</span>
+          <span class="brand-subtitle">Autonomous Resistance Telemetry &amp; Vacuum Controller</span>
         </div>
       </div>
 
       <div class="header-actions">
-        <!-- Live status indicator -->
+        <!-- Main Hardware Power Control -->
+        <div class="power-control-group" title="Toggle Main Hardware Power">
+          <span class="power-label">SYSTEM POWER:</span>
+          <button id="system-power-toggle" class="power-toggle-btn powered-off">
+            <span class="power-dot"></span>
+            <span id="power-toggle-text">OFF</span>
+          </button>
+        </div>
+
+        <!-- Live BLE status indicator -->
         <div class="connection-status disconnected" id="connection-status-pill">
           <span class="status-dot"></span>
           <span class="status-label" id="connection-status-text">Disconnected</span>
         </div>
 
-        <button id="demo-mode-toggle" class="btn btn-secondary" title="Simulate incoming particle telemetry without hardware">
+        <!-- Simulation mode toggle -->
+        <button id="demo-mode-toggle" class="btn btn-secondary" title="Simulate incoming resistance telemetry without physical ESP32">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="5 3 19 12 5 21 5 3" />
           </svg>
           <span id="demo-toggle-label">Start Simulation</span>
         </button>
 
+        <!-- BLE Connect button -->
         <button id="ble-connect-btn" class="btn btn-primary">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
             <path d="m7 7 10 10-5 5V2l5 5L7 17" stroke-linecap="round" stroke-linejoin="round" />
@@ -51,7 +58,7 @@
           <span>Connect ESP32</span>
         </button>
 
-        <button id="settings-open-btn" class="btn btn-icon" title="BLE & System Settings">
+        <button id="settings-open-btn" class="btn btn-icon" title="BLE & Resistance Threshold Settings">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"></circle>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
@@ -64,139 +71,174 @@
     <main class="dashboard-grid">
       <!-- Top Metric Cards -->
       <section class="metrics-row">
-        <!-- Metric 1: Total Count -->
+        <!-- Metric 1: Real-time Circuit Resistance -->
         <div class="card metric-card">
           <div class="metric-header">
-            <span class="metric-title">Cumulative Particle Count</span>
-            <span class="metric-badge" id="rate-badge">+0 /s</span>
+            <span class="metric-title">Collector Resistance</span>
+            <span class="metric-badge" id="resistance-rate-badge">+0.0 Ω/s</span>
           </div>
           <div class="metric-value-container">
-            <span class="metric-value" id="val-particle-count">0</span>
-            <span class="metric-unit">particles</span>
+            <span class="metric-value text-accent" id="val-resistance">0.0</span>
+            <span class="metric-unit">Ω</span>
           </div>
-          <div class="metric-subtext">Total detected during current sampling</div>
+          <div class="metric-subtext">
+            <div class="progress-bar-bg" style="margin-top: 6px; height: 6px;">
+              <div class="progress-bar-fill fill-cyan" id="resistance-threshold-bar" style="width: 0%"></div>
+            </div>
+            <div style="display:flex; justify-content:space-between; margin-top:4px;">
+              <span>0 Ω</span>
+              <span id="resistance-pct-label">0% of Cutoff</span>
+              <span id="resistance-threshold-sublabel">1,000 Ω</span>
+            </div>
+          </div>
         </div>
 
-        <!-- Metric 2: Particle Concentration -->
+        <!-- Metric 2: Autonomous Threshold Cutoff -->
         <div class="card metric-card">
           <div class="metric-header">
-            <span class="metric-title">Particle Concentration</span>
-            <span class="metric-tag info">Live</span>
+            <span class="metric-title">Cutoff Threshold</span>
+            <span class="metric-tag info" id="threshold-status-tag">Auto-End Target</span>
           </div>
           <div class="metric-value-container">
-            <span class="metric-value text-accent" id="val-concentration">0.0</span>
-            <span class="metric-unit">particles / mL</span>
+            <span class="metric-value" id="val-threshold">1,000</span>
+            <span class="metric-unit">Ω (1 kΩ)</span>
           </div>
-          <div class="metric-subtext">Peak recorded: <span id="val-peak-conc">0.0</span> p/mL</div>
+          <div class="metric-subtext">
+            Remaining margin: <span id="val-remaining-margin" class="font-mono">1,000.0 Ω</span>
+          </div>
         </div>
 
-        <!-- Metric 3: Flow & Ingestion Speed -->
+        <!-- Metric 3: Vacuum Power Mode -->
         <div class="card metric-card">
           <div class="metric-header">
-            <span class="metric-title">Fluid Intake Rate</span>
-            <span class="metric-tag" id="flow-status-tag">Optimal</span>
+            <span class="metric-title">Vacuum Power Level</span>
+            <span class="metric-tag" id="vac-status-tag">Level 1 (20%)</span>
           </div>
           <div class="metric-value-container">
-            <span class="metric-value" id="val-flow-rate">0.0</span>
-            <span class="metric-unit">mL / min</span>
+            <span class="metric-value text-emerald" id="val-vacuum-level">1</span>
+            <span class="metric-unit">/ 5 Power</span>
           </div>
-          <div class="metric-subtext">Sensor Voltage: <span id="val-sensor-voltage">0.00</span> V</div>
+          <div class="metric-subtext">Motor PWM Output: <span id="val-vacuum-pwm">20% Duty</span></div>
         </div>
 
-        <!-- Metric 4: Session State & Timer -->
+        <!-- Metric 4: Operational Task State & Timer -->
         <div class="card metric-card">
           <div class="metric-header">
-            <span class="metric-title">Sampling Status</span>
-            <span class="metric-tag success" id="val-device-state">STANDBY</span>
+            <span class="metric-title">Task State</span>
+            <span class="metric-tag" id="val-device-state">STANDBY</span>
           </div>
           <div class="metric-value-container">
             <span class="metric-value font-mono" id="val-session-time">00:00:00</span>
           </div>
-          <div class="metric-subtext">ESP32 RSSI: <span id="val-rssi">--</span> dBm</div>
+          <div class="metric-subtext">Hardware Power: <span id="val-power-indicator">OFF</span></div>
         </div>
       </section>
 
-      <!-- Center Telemetry Chart & Particle Spectra -->
+      <!-- Center Section: Resistance Graph + Physical Digital Twin & Control Deck -->
       <section class="center-row">
-        <!-- Live Real-time Chart Card -->
+        <!-- Live Resistance Over Time Chart Card -->
         <div class="card chart-card">
           <div class="card-header">
             <div class="card-title-group">
-              <h2 class="card-title">Real-Time Particle Detection Stream</h2>
-              <span class="card-caption">Continuous optical sensor readings over BLE notification stream</span>
+              <h2 class="card-title">Circuit Resistance Over Time</h2>
+              <span class="card-caption">Real-time telemetry tracking particle deposition resistance with automatic 1 kΩ cutoff marker</span>
             </div>
             <div class="chart-controls">
-              <button id="chart-toggle-pause" class="btn btn-sm btn-ghost" title="Pause/Resume stream rendering">
+              <button id="chart-toggle-pause" class="btn btn-sm btn-ghost" title="Pause/Resume graph rendering">
                 <span id="pause-btn-text">Pause</span>
               </button>
-              <button id="chart-reset-btn" class="btn btn-sm btn-ghost" title="Clear chart buffer">Clear</button>
+              <button id="chart-reset-btn" class="btn btn-sm btn-ghost" title="Clear recorded chart points">Clear</button>
             </div>
           </div>
           <div class="chart-container">
             <canvas id="telemetry-canvas"></canvas>
             <div class="chart-legend">
-              <span class="legend-item"><span class="legend-bullet conc"></span> Instantaneous Concentration (p/mL)</span>
-              <span class="legend-item"><span class="legend-bullet raw"></span> Sensor Raw Optical Signal (mV)</span>
+              <span class="legend-item"><span class="legend-bullet conc"></span> Measured Resistance (Ω)</span>
+              <span class="legend-item"><span class="legend-bullet threshold-line"></span> Autonomous Cutoff Threshold (1,000 Ω)</span>
             </div>
           </div>
         </div>
 
-        <!-- Particle Size Distribution Binning -->
-        <div class="card spectrum-card">
+        <!-- Physical Twin: Hardware Status Lights & Actuation Controls -->
+        <div class="card hardware-twin-card">
           <div class="card-header">
-            <h2 class="card-title">Size Classification</h2>
-            <span class="card-caption">Estimated particle diameter</span>
+            <h2 class="card-title">Hardware Digital Twin</h2>
+            <span class="card-caption">Live physical LED mirrors &amp; device controls</span>
           </div>
-          <div class="spectrum-body">
-            <div class="bin-item">
-              <div class="bin-label-row">
-                <span>Micro (&lt; 5 μm)</span>
-                <span id="bin-micro-count" class="font-mono">0</span>
-              </div>
-              <div class="progress-bar-bg">
-                <div class="progress-bar-fill fill-cyan" id="bin-micro-bar" style="width: 0%"></div>
+
+          <div class="twin-body">
+            <!-- Physical Indicator Lights Mirror -->
+            <div class="twin-section">
+              <div class="section-heading">Physical Status LEDs Mirror</div>
+              <div class="led-indicators-panel">
+                <!-- Green LED: Sensing / Normal -->
+                <div class="led-unit" id="led-green-unit">
+                  <div class="led-bulb led-green" id="led-green-bulb">
+                    <div class="led-core"></div>
+                    <div class="led-flare"></div>
+                  </div>
+                  <div class="led-info">
+                    <span class="led-name">GREEN LED</span>
+                    <span class="led-state-text" id="led-green-state">OFF</span>
+                    <span class="led-detail">Sensing Active (&lt; 1 kΩ)</span>
+                  </div>
+                </div>
+
+                <!-- Red LED: Threshold Exceeded / Task End -->
+                <div class="led-unit" id="led-red-unit">
+                  <div class="led-bulb led-red" id="led-red-bulb">
+                    <div class="led-core"></div>
+                    <div class="led-flare"></div>
+                  </div>
+                  <div class="led-info">
+                    <span class="led-name">RED LED</span>
+                    <span class="led-state-text" id="led-red-state">OFF</span>
+                    <span class="led-detail">Threshold Reached (≥ 1 kΩ)</span>
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div class="bin-item">
-              <div class="bin-label-row">
-                <span>Medium (5 – 25 μm)</span>
-                <span id="bin-med-count" class="font-mono">0</span>
+            <!-- Vacuum Power Level Selector (Levels 1 to 5) -->
+            <div class="twin-section">
+              <div class="section-heading-row">
+                <span class="section-heading">Vacuum Power Level</span>
+                <span class="vacuum-level-badge" id="vac-selector-badge">Level 1</span>
               </div>
-              <div class="progress-bar-bg">
-                <div class="progress-bar-fill fill-emerald" id="bin-med-bar" style="width: 0%"></div>
+              <div class="vacuum-buttons-row">
+                <button class="vac-btn active" data-level="1">1</button>
+                <button class="vac-btn" data-level="2">2</button>
+                <button class="vac-btn" data-level="3">3</button>
+                <button class="vac-btn" data-level="4">4</button>
+                <button class="vac-btn" data-level="5">5</button>
+              </div>
+              <div class="vacuum-scale-labels">
+                <span>Low (Level 1)</span>
+                <span>Medium (Level 3)</span>
+                <span>Max Suction (Level 5)</span>
               </div>
             </div>
 
-            <div class="bin-item">
-              <div class="bin-label-row">
-                <span>Macro (&gt; 25 μm)</span>
-                <span id="bin-macro-count" class="font-mono">0</span>
+            <!-- Sensing Execution Control Deck -->
+            <div class="twin-section controls-section">
+              <div class="section-heading">Sensing Execution</div>
+              <div class="sensing-action-group">
+                <button id="sensing-toggle-btn" class="btn btn-sense-start" title="Execute Start Sensing command (not main power)">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="5 3 19 12 5 21 5 3" />
+                  </svg>
+                  <span id="sensing-btn-text">START SENSING</span>
+                </button>
+                <button id="task-reset-btn" class="btn btn-secondary" title="Reset cycle and tare circuit">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                  </svg>
+                  <span>Reset / Tare</span>
+                </button>
               </div>
-              <div class="progress-bar-bg">
-                <div class="progress-bar-fill fill-violet" id="bin-macro-bar" style="width: 0%"></div>
-              </div>
-            </div>
-
-            <div class="collector-status-box">
-              <div class="box-title">Collector Mechanism</div>
-              <div class="status-grid">
-                <div class="status-cell">
-                  <span class="status-cell-label">Fluid Pump</span>
-                  <span class="status-cell-val" id="stat-pump">OFF</span>
-                </div>
-                <div class="status-cell">
-                  <span class="status-cell-label">Optical Laser</span>
-                  <span class="status-cell-val" id="stat-laser">ARMED</span>
-                </div>
-                <div class="status-cell">
-                  <span class="status-cell-label">Filter Valve</span>
-                  <span class="status-cell-val" id="stat-valve">OPEN</span>
-                </div>
-                <div class="status-cell">
-                  <span class="status-cell-label">Buffer Capacity</span>
-                  <span class="status-cell-val" id="stat-buffer">98% Free</span>
-                </div>
+              <div class="sensing-note" id="sensing-status-note">
+                Press <strong>Start Sensing</strong> to engage vacuum suction and track circuit resistance.
               </div>
             </div>
           </div>
@@ -207,11 +249,11 @@
       <section class="card terminal-card">
         <div class="card-header">
           <div class="card-title-group">
-            <h2 class="card-title">ESP32 Firmware Monitor & Control Terminal</h2>
-            <span class="card-caption">Direct bidirectional serial communication over BLE UART without Arduino IDE locks</span>
+            <h2 class="card-title">ESP32 Firmware Monitor &amp; Control Terminal</h2>
+            <span class="card-caption">Bidirectional serial communication over BLE UART without Arduino IDE locks</span>
           </div>
           <div class="terminal-actions">
-            <button id="export-csv-btn" class="btn btn-sm btn-secondary" title="Export session data as CSV">
+            <button id="export-csv-btn" class="btn btn-sm btn-secondary" title="Export resistance telemetry session as CSV">
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
               </svg>
@@ -225,11 +267,14 @@
         <!-- Terminal Quick Action Commands -->
         <div class="quick-commands">
           <span class="quick-cmd-label">Quick Commands:</span>
-          <button class="cmd-pill" data-cmd="START">▶ START_COLLECTION</button>
-          <button class="cmd-pill" data-cmd="STOP">⏹ STOP_COLLECTION</button>
-          <button class="cmd-pill" data-cmd="TARE">⚖ TARE_SENSOR</button>
-          <button class="cmd-pill" data-cmd="CALIBRATE">⚙ CALIBRATE</button>
-          <button class="cmd-pill" data-cmd="FLUSH">💧 FLUSH_CHAMBER</button>
+          <button class="cmd-pill" data-cmd="POWER:ON">⚡ POWER_ON</button>
+          <button class="cmd-pill" data-cmd="POWER:OFF">🔌 POWER_OFF</button>
+          <button class="cmd-pill" data-cmd="SENSE:START">▶ SENSE_START</button>
+          <button class="cmd-pill" data-cmd="SENSE:STOP">⏹ SENSE_STOP</button>
+          <button class="cmd-pill" data-cmd="VAC:1">💨 VAC_LEVEL_1</button>
+          <button class="cmd-pill" data-cmd="VAC:3">💨 VAC_LEVEL_3</button>
+          <button class="cmd-pill" data-cmd="VAC:5">💨 VAC_LEVEL_5</button>
+          <button class="cmd-pill" data-cmd="TARE">⚖ TARE_RESISTANCE</button>
           <button class="cmd-pill" data-cmd="STATUS">ℹ GET_STATUS</button>
         </div>
 
@@ -238,14 +283,14 @@
           <div class="log-line sys">
             <span class="log-time">[SYSTEM]</span>
             <span class="log-tag tag-sys">SYS</span>
-            <span class="log-msg">Web Bluetooth Workspace ready. Click "Connect ESP32" or "Start Simulation" to begin telemetry stream.</span>
+            <span class="log-msg">Web Bluetooth Workspace ready. Resistance cutoff target: 1,000 Ω. Click "Connect ESP32" or "Start Simulation".</span>
           </div>
         </div>
 
         <!-- Command Input Form -->
         <form class="terminal-input-bar" id="terminal-cmd-form">
           <span class="prompt-symbol">&gt;</span>
-          <input type="text" id="terminal-input" placeholder="Type custom firmware command (e.g. SET_FLOW:15.0 or PING)..." autocomplete="off" />
+          <input type="text" id="terminal-input" placeholder="Type custom firmware command (e.g. SENSE:START, VAC:4, SET_THRESH:1200)..." autocomplete="off" />
           <button type="submit" class="btn btn-primary btn-sm">Send</button>
         </form>
       </section>
@@ -255,10 +300,15 @@
     <div class="modal-backdrop" id="settings-modal" style="display: none;">
       <div class="modal-window">
         <div class="modal-header">
-          <h3 class="modal-title">Bluetooth & Sensor Settings</h3>
+          <h3 class="modal-title">Bluetooth &amp; Resistance Threshold Settings</h3>
           <button class="modal-close-btn" id="settings-close-btn">&times;</button>
         </div>
         <div class="modal-body">
+          <div class="form-group">
+            <label for="cfg-threshold">Resistance Cutoff Threshold (Ohms)</label>
+            <input type="number" id="cfg-threshold" value="1000" min="100" max="50000" step="50" />
+            <small class="form-help">Task autonomously ends and switches lights to RED when resistance exceeds this value (default: 1,000 Ω = 1 kΩ).</small>
+          </div>
           <div class="form-group">
             <label for="cfg-service-uuid">BLE Service UUID</label>
             <input type="text" id="cfg-service-uuid" value="6e400001-b5a3-f393-e0a9-e50e24dcca9e" />
@@ -275,23 +325,6 @@
           <div class="form-group">
             <label for="cfg-name-filter">Device Name Prefix Filter</label>
             <input type="text" id="cfg-name-filter" value="Particle" placeholder="e.g. Particle, ESP32" />
-          </div>
-          <div class="form-row">
-            <div class="form-group half">
-              <label for="cfg-baud-rate">Target Baud Equivalent</label>
-              <select id="cfg-baud-rate">
-                <option value="115200" selected>115200 bps</option>
-                <option value="9600">9600 bps</option>
-                <option value="57600">57600 bps</option>
-              </select>
-            </div>
-            <div class="form-group half">
-              <label for="cfg-auto-reconnect">Auto-Reconnect</label>
-              <select id="cfg-auto-reconnect">
-                <option value="true" selected>Enabled</option>
-                <option value="false">Disabled</option>
-              </select>
-            </div>
           </div>
         </div>
         <div class="modal-footer">

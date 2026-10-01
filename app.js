@@ -1,11 +1,13 @@
 /**
- * Ingestive Particle Collector - ESP32 Web Bluetooth Telemetry Hub
- * Handles BLE connection, Nordic UART Service (NUS), live canvas rendering,
- * data classification, and serial monitor communications.
+ * Ingestive Particle Collector - Autonomous Resistance Telemetry & Vacuum Controller
+ * Web Bluetooth GATT controller for ESP32.
+ * Tracks circuit resistance over time, mirrors physical Green/Red LEDs, controls vacuum levels (1-5),
+ * and handles autonomous task termination when resistance exceeds 1,000 Ohms.
  */
 
 // Application State
 const state = {
+  // BLE Connection
   device: null,
   server: null,
   rxCharacteristic: null,
@@ -21,187 +23,529 @@ const state = {
   txUuid: '6e400002-b5a3-f393-e0a9-e50e24dcca9e', // Web -> ESP32 (Write)
   namePrefix: 'Particle',
 
-  // Telemetry Metrics
-  particleCount: 0,
-  concentration: 0,
-  peakConcentration: 0,
-  flowRate: 12.4,
-  sensorVoltage: 3.28,
-  deviceStatus: 'STANDBY',
+  // Core Telemetry & Hardware State
+  systemPower: false,        // Main Unit Power (ON/OFF)
+  isSensing: false,          // Sensing Execution (START/STOP)
+  vacuumLevel: 1,            // Vacuum suction level (1 to 5)
+  currentResistance: 0.0,    // Measured circuit resistance in Ohms
+  resistanceThreshold: 1000.0, // Cutoff threshold in Ohms (1 kΩ)
+  ledState: 'OFF',           // 'OFF' | 'GREEN' | 'RED'
+  taskCompleted: false,
 
-  // Particle bins
-  bins: {
-    micro: 0,
-    medium: 0,
-    macro: 0
-  },
+  // Historical Telemetry for Chart & CSV Export
+  history: [], // { timestamp, timeStr, res, threshold, vac, isSensing, systemPower, led }
+  maxHistoryPoints: 240,
 
-  // Historical data for charts & export
-  history: [], // { timestamp, timeStr, count, conc, flow, volt }
-  maxHistoryPoints: 200,
-
-  // Session timer
+  // Timers
   sessionStartTime: null,
   timerInterval: null,
   simInterval: null,
+  lastResistanceVal: 0.0,
+  lastRateCalcTime: Date.now()
 };
 
 // DOM Elements
 const ui = {
+  // Top bar
+  systemPowerToggle: document.getElementById('system-power-toggle'),
+  powerToggleText: document.getElementById('power-toggle-text'),
   connectionStatusPill: document.getElementById('connection-status-pill'),
   connectionStatusText: document.getElementById('connection-status-text'),
-  bleConnectBtn: document.getElementById('ble-connect-btn'),
   demoModeToggle: document.getElementById('demo-mode-toggle'),
   demoToggleLabel: document.getElementById('demo-toggle-label'),
+  bleConnectBtn: document.getElementById('ble-connect-btn'),
+  settingsOpenBtn: document.getElementById('settings-open-btn'),
 
   // Metrics
-  valParticleCount: document.getElementById('val-particle-count'),
-  rateBadge: document.getElementById('rate-badge'),
-  valConcentration: document.getElementById('val-concentration'),
-  valPeakConc: document.getElementById('val-peak-conc'),
-  valFlowRate: document.getElementById('val-flow-rate'),
-  valSensorVoltage: document.getElementById('val-sensor-voltage'),
+  valResistance: document.getElementById('val-resistance'),
+  resistanceRateBadge: document.getElementById('resistance-rate-badge'),
+  resistanceThresholdBar: document.getElementById('resistance-threshold-bar'),
+  resistancePctLabel: document.getElementById('resistance-pct-label'),
+  resistanceThresholdSublabel: document.getElementById('resistance-threshold-sublabel'),
+  thresholdStatusTag: document.getElementById('threshold-status-tag'),
+  valThreshold: document.getElementById('val-threshold'),
+  valRemainingMargin: document.getElementById('val-remaining-margin'),
+  vacStatusTag: document.getElementById('vac-status-tag'),
+  valVacuumLevel: document.getElementById('val-vacuum-level'),
+  valVacuumPwm: document.getElementById('val-vacuum-pwm'),
   valDeviceState: document.getElementById('val-device-state'),
   valSessionTime: document.getElementById('val-session-time'),
-  valRssi: document.getElementById('val-rssi'),
-  flowStatusTag: document.getElementById('flow-status-tag'),
+  valPowerIndicator: document.getElementById('val-power-indicator'),
 
-  // Bins
-  binMicroCount: document.getElementById('bin-micro-count'),
-  binMicroBar: document.getElementById('bin-micro-bar'),
-  binMedCount: document.getElementById('bin-med-count'),
-  binMedBar: document.getElementById('bin-med-bar'),
-  binMacroCount: document.getElementById('bin-macro-count'),
-  binMacroBar: document.getElementById('bin-macro-bar'),
+  // Physical LED Twin
+  ledGreenUnit: document.getElementById('led-green-unit'),
+  ledGreenBulb: document.getElementById('led-green-bulb'),
+  ledGreenState: document.getElementById('led-green-state'),
+  ledRedUnit: document.getElementById('led-red-unit'),
+  ledRedBulb: document.getElementById('led-red-bulb'),
+  ledRedState: document.getElementById('led-red-state'),
 
-  // Canvas
+  // Vacuum selector buttons
+  vacSelectorBadge: document.getElementById('vac-selector-badge'),
+  vacButtons: document.querySelectorAll('.vac-btn'),
+
+  // Sensing execution controls
+  sensingToggleBtn: document.getElementById('sensing-toggle-btn'),
+  sensingBtnText: document.getElementById('sensing-btn-text'),
+  taskResetBtn: document.getElementById('task-reset-btn'),
+  sensingStatusNote: document.getElementById('sensing-status-note'),
+
+  // Chart
   canvas: document.getElementById('telemetry-canvas'),
-  pauseBtn: document.getElementById('chart-toggle-pause'),
+  chartTogglePause: document.getElementById('chart-toggle-pause'),
   pauseBtnText: document.getElementById('pause-btn-text'),
-  resetChartBtn: document.getElementById('chart-reset-btn'),
+  chartResetBtn: document.getElementById('chart-reset-btn'),
 
   // Terminal
   terminalBody: document.getElementById('terminal-body'),
-  terminalForm: document.getElementById('terminal-cmd-form'),
+  terminalCmdForm: document.getElementById('terminal-cmd-form'),
   terminalInput: document.getElementById('terminal-input'),
   clearTermBtn: document.getElementById('clear-term-btn'),
   exportCsvBtn: document.getElementById('export-csv-btn'),
   exportJsonBtn: document.getElementById('export-json-btn'),
+  quickCmdButtons: document.querySelectorAll('.cmd-pill'),
 
   // Settings Modal
-  settingsBtn: document.getElementById('settings-open-btn'),
   settingsModal: document.getElementById('settings-modal'),
   settingsCloseBtn: document.getElementById('settings-close-btn'),
   settingsSaveBtn: document.getElementById('settings-save-btn'),
+  cfgThreshold: document.getElementById('cfg-threshold'),
   cfgServiceUuid: document.getElementById('cfg-service-uuid'),
   cfgRxUuid: document.getElementById('cfg-rx-uuid'),
   cfgTxUuid: document.getElementById('cfg-tx-uuid'),
-  cfgNameFilter: document.getElementById('cfg-name-filter'),
-  cfgAutoReconnect: document.getElementById('cfg-auto-reconnect')
+  cfgNameFilter: document.getElementById('cfg-name-filter')
 };
 
-// Canvas 2D Context Setup
+// Canvas 2D Context
 const ctx = ui.canvas.getContext('2d');
-let canvasWidth = 0;
-let canvasHeight = 0;
+let animationFrameId = null;
 
+// --- Initialize App ---
+function init() {
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  setupEventListeners();
+  startChartRenderLoop();
+
+  // Initial UI state
+  updatePowerUI(false);
+  updateSensingUI(false);
+  updateLedUI('OFF');
+  updateVacuumUI(1);
+  updateResistanceMetrics(0.0);
+
+  appendLog('SYS', 'System initialized. Nordic UART Service BLE configured.', 'sys');
+}
+
+// --- Responsive Canvas Setup ---
 function resizeCanvas() {
   const rect = ui.canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   ui.canvas.width = rect.width * dpr;
   ui.canvas.height = rect.height * dpr;
-  canvasWidth = rect.width;
-  canvasHeight = rect.height;
   ctx.scale(dpr, dpr);
 }
-window.addEventListener('resize', resizeCanvas);
-resizeCanvas();
 
-// --- Terminal Logging Helpers ---
-function appendLog(tag, message, type = 'sys') {
+// --- Event Listeners Setup ---
+function setupEventListeners() {
+  // Main System Power Toggle
+  ui.systemPowerToggle.addEventListener('click', toggleSystemPower);
+
+  // Sensing Button (Start / Stop)
+  ui.sensingToggleBtn.addEventListener('click', toggleSensing);
+
+  // Reset / Tare Button
+  ui.taskResetBtn.addEventListener('click', resetTaskCycle);
+
+  // Vacuum Level Buttons (1 to 5)
+  ui.vacButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const level = parseInt(btn.getAttribute('data-level'), 10);
+      setVacuumLevel(level);
+    });
+  });
+
+  // Web Bluetooth Connect Button
+  ui.bleConnectBtn.addEventListener('click', () => {
+    if (state.isConnected) {
+      disconnectBle();
+    } else {
+      connectBle();
+    }
+  });
+
+  // Demo / Simulation Mode Toggle
+  ui.demoModeToggle.addEventListener('click', toggleDemoMode);
+
+  // Chart Controls
+  ui.chartTogglePause.addEventListener('click', () => {
+    state.isChartPaused = !state.isChartPaused;
+    ui.pauseBtnText.textContent = state.isChartPaused ? 'Resume' : 'Pause';
+    appendLog('SYS', `Chart rendering ${state.isChartPaused ? 'paused' : 'resumed'}.`, 'sys');
+  });
+
+  ui.chartResetBtn.addEventListener('click', () => {
+    state.history = [];
+    appendLog('SYS', 'Chart historical buffer cleared.', 'sys');
+  });
+
+  // Terminal & Export
+  ui.terminalCmdForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const cmd = ui.terminalInput.value.trim();
+    if (cmd) {
+      sendCommand(cmd);
+      ui.terminalInput.value = '';
+    }
+  });
+
+  ui.clearTermBtn.addEventListener('click', () => {
+    ui.terminalBody.innerHTML = '';
+  });
+
+  ui.exportCsvBtn.addEventListener('click', exportCsv);
+  ui.exportJsonBtn.addEventListener('click', exportJson);
+
+  ui.quickCmdButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const cmd = btn.getAttribute('data-cmd');
+      sendCommand(cmd);
+    });
+  });
+
+  // Settings Modal
+  ui.settingsOpenBtn.addEventListener('click', () => {
+    ui.cfgThreshold.value = state.resistanceThreshold;
+    ui.cfgServiceUuid.value = state.serviceUuid;
+    ui.cfgRxUuid.value = state.rxUuid;
+    ui.cfgTxUuid.value = state.txUuid;
+    ui.cfgNameFilter.value = state.namePrefix;
+    ui.settingsModal.style.display = 'flex';
+  });
+
+  ui.settingsCloseBtn.addEventListener('click', () => {
+    ui.settingsModal.style.display = 'none';
+  });
+
+  ui.settingsSaveBtn.addEventListener('click', () => {
+    const newThresh = parseFloat(ui.cfgThreshold.value);
+    if (!isNaN(newThresh) && newThresh > 0) {
+      state.resistanceThreshold = newThresh;
+      ui.valThreshold.textContent = newThresh.toLocaleString();
+      ui.resistanceThresholdSublabel.textContent = `${newThresh.toLocaleString()} Ω`;
+      sendCommand(`SET_THRESH:${newThresh}`);
+    }
+    state.serviceUuid = ui.cfgServiceUuid.value.trim().toLowerCase();
+    state.rxUuid = ui.cfgRxUuid.value.trim().toLowerCase();
+    state.txUuid = ui.cfgTxUuid.value.trim().toLowerCase();
+    state.namePrefix = ui.cfgNameFilter.value.trim();
+
+    ui.settingsModal.style.display = 'none';
+    appendLog('SYS', `Settings saved. Threshold: ${state.resistanceThreshold} Ω`, 'sys');
+  });
+}
+
+// --- System Power Control ---
+function toggleSystemPower() {
+  const newPower = !state.systemPower;
+  updatePowerUI(newPower);
+
+  // Send hardware command
+  sendCommand(newPower ? 'POWER:ON' : 'POWER:OFF');
+
+  if (!newPower && state.isSensing) {
+    // Turning power off automatically halts sensing
+    stopSensing();
+  }
+}
+
+function updatePowerUI(powered) {
+  state.systemPower = powered;
+  if (powered) {
+    ui.systemPowerToggle.className = 'power-toggle-btn powered-on';
+    ui.powerToggleText.textContent = 'ON';
+    ui.valPowerIndicator.textContent = 'ON';
+    ui.valPowerIndicator.style.color = 'var(--accent-emerald)';
+    if (!state.isSensing && !state.taskCompleted) {
+      ui.valDeviceState.textContent = 'STANDBY';
+      ui.valDeviceState.className = 'metric-tag';
+    }
+  } else {
+    ui.systemPowerToggle.className = 'power-toggle-btn powered-off';
+    ui.powerToggleText.textContent = 'OFF';
+    ui.valPowerIndicator.textContent = 'OFF';
+    ui.valPowerIndicator.style.color = 'var(--accent-rose)';
+    ui.valDeviceState.textContent = 'POWER OFF';
+    ui.valDeviceState.className = 'metric-tag';
+    updateLedUI('OFF');
+  }
+}
+
+// --- Vacuum Power Level (1 to 5) ---
+function setVacuumLevel(level) {
+  if (level < 1) level = 1;
+  if (level > 5) level = 5;
+
+  state.vacuumLevel = level;
+  updateVacuumUI(level);
+  sendCommand(`VAC:${level}`);
+}
+
+function updateVacuumUI(level) {
+  state.vacuumLevel = level;
+  ui.valVacuumLevel.textContent = level;
+  ui.vacSelectorBadge.textContent = `Level ${level}`;
+
+  // Duty cycle percentage calculation (20% to 100%)
+  const duty = level * 20;
+  ui.valVacuumPwm.textContent = `${duty}% Duty`;
+  ui.vacStatusTag.textContent = `Level ${level} (${duty}%)`;
+
+  // Update button active state
+  ui.vacButtons.forEach(btn => {
+    const btnLevel = parseInt(btn.getAttribute('data-level'), 10);
+    if (btnLevel === level) {
+      btn.classList.add('active');
+    } else {
+      btn.classList.remove('active');
+    }
+  });
+}
+
+// --- Sensing Execution (Start / Stop) ---
+function toggleSensing() {
+  if (!state.systemPower) {
+    alert('Please turn SYSTEM POWER ON before starting sensing.');
+    appendLog('WARN', 'Cannot start sensing: System Power is OFF.', 'warn');
+    return;
+  }
+
+  if (state.isSensing) {
+    stopSensing();
+    sendCommand('SENSE:STOP');
+  } else {
+    startSensing();
+    sendCommand('SENSE:START');
+  }
+}
+
+function startSensing() {
+  if (!state.systemPower) return;
+  state.isSensing = true;
+  state.taskCompleted = false;
+
+  updateSensingUI(true);
+  updateLedUI('GREEN'); // Switch lights to GREEN upon sensing start
+  startSessionTimer();
+
+  appendLog('SYS', `Sensing task started at Vacuum Level ${state.vacuumLevel}. Cutoff threshold: ${state.resistanceThreshold} Ω.`, 'sys');
+}
+
+function stopSensing() {
+  state.isSensing = false;
+  updateSensingUI(false);
+  stopSessionTimer();
+
+  if (!state.taskCompleted) {
+    updateLedUI('OFF');
+    ui.valDeviceState.textContent = 'STANDBY';
+    ui.valDeviceState.className = 'metric-tag';
+  }
+
+  appendLog('SYS', 'Sensing stopped.', 'sys');
+}
+
+function updateSensingUI(active) {
+  if (active) {
+    ui.sensingToggleBtn.className = 'btn btn-sense-start sensing-active';
+    ui.sensingBtnText.textContent = 'STOP SENSING';
+    ui.valDeviceState.textContent = 'SENSING ACTIVE';
+    ui.valDeviceState.className = 'metric-tag success';
+    ui.sensingStatusNote.innerHTML = `Sensing active: Vacuum suction running at <strong>Level ${state.vacuumLevel}</strong>. Monitoring resistance curve...`;
+  } else {
+    ui.sensingToggleBtn.className = 'btn btn-sense-start';
+    ui.sensingBtnText.textContent = 'START SENSING';
+    ui.sensingStatusNote.innerHTML = `Press <strong>Start Sensing</strong> to engage vacuum suction and track circuit resistance.`;
+  }
+}
+
+// --- Physical Status LEDs Mirror ---
+function updateLedUI(led) {
+  state.ledState = led;
+
+  // Clear states
+  ui.ledGreenBulb.classList.remove('active');
+  ui.ledRedBulb.classList.remove('active');
+  ui.ledGreenUnit.className = 'led-unit';
+  ui.ledRedUnit.className = 'led-unit';
+  ui.ledGreenState.textContent = 'OFF';
+  ui.ledRedState.textContent = 'OFF';
+
+  if (led === 'GREEN') {
+    ui.ledGreenBulb.classList.add('active');
+    ui.ledGreenUnit.classList.add('active-unit', 'active-green');
+    ui.ledGreenState.textContent = 'LIT (NORMAL)';
+  } else if (led === 'RED') {
+    ui.ledRedBulb.classList.add('active');
+    ui.ledRedUnit.classList.add('active-unit', 'active-red');
+    ui.ledRedState.textContent = 'LIT (THRESHOLD)';
+  }
+}
+
+// --- Reset / Tare Cycle ---
+function resetTaskCycle() {
+  state.currentResistance = 0.0;
+  state.taskCompleted = false;
+  updateResistanceMetrics(0.0);
+
+  if (state.systemPower) {
+    updateLedUI('OFF');
+    ui.valDeviceState.textContent = 'STANDBY';
+    ui.valDeviceState.className = 'metric-tag';
+  }
+
+  sendCommand('TARE');
+  appendLog('SYS', 'Cycle reset: Baseline resistance zeroed.', 'sys');
+}
+
+// --- Telemetry Processing & Autonomous Threshold Cutoff ---
+function applyTelemetryData({ res, thresh, led, power, sensing, vac }) {
+  if (power !== undefined && power !== state.systemPower) {
+    updatePowerUI(Boolean(power));
+  }
+
+  if (vac !== undefined && vac !== state.vacuumLevel) {
+    updateVacuumUI(Number(vac));
+  }
+
+  if (thresh !== undefined && thresh !== state.resistanceThreshold) {
+    state.resistanceThreshold = Number(thresh);
+    ui.valThreshold.textContent = Number(thresh).toLocaleString();
+    ui.resistanceThresholdSublabel.textContent = `${Number(thresh).toLocaleString()} Ω`;
+  }
+
+  if (res !== undefined) {
+    const numRes = parseFloat(res);
+    state.currentResistance = numRes;
+    updateResistanceMetrics(numRes);
+
+    // Calculate Rate (Ω / sec)
+    const nowTime = Date.now();
+    const dt = (nowTime - state.lastRateCalcTime) / 1000;
+    if (dt >= 0.5) {
+      const dR = numRes - state.lastResistanceVal;
+      const rate = dt > 0 ? (dR / dt).toFixed(1) : '0.0';
+      ui.resistanceRateBadge.textContent = `${rate >= 0 ? '+' : ''}${rate} Ω/s`;
+      state.lastResistanceVal = numRes;
+      state.lastRateCalcTime = nowTime;
+    }
+
+    // --- AUTONOMOUS CUTOFF CHECK ---
+    // Formula determines resistance is over threshold (default 1k ohms)
+    if (numRes >= state.resistanceThreshold) {
+      if (!state.taskCompleted) {
+        state.taskCompleted = true;
+
+        // Switch physical & virtual LED from GREEN to RED
+        updateLedUI('RED');
+
+        // Automatically end the sensing task
+        if (state.isSensing) {
+          state.isSensing = false;
+          updateSensingUI(false);
+          stopSessionTimer();
+        }
+
+        ui.valDeviceState.textContent = 'TASK COMPLETED (CUTOFF)';
+        ui.valDeviceState.className = 'metric-tag alert';
+        ui.thresholdStatusTag.textContent = 'THRESHOLD REACHED';
+        ui.thresholdStatusTag.className = 'metric-tag alert';
+
+        appendLog('WARN', `🚨 AUTONOMOUS THRESHOLD REACHED: Resistance ${numRes.toFixed(1)} Ω exceeds cutoff target (${state.resistanceThreshold} Ω). Task completed! Lights switched to RED.`, 'warn');
+      }
+    } else {
+      if (state.isSensing && !state.taskCompleted) {
+        updateLedUI('GREEN');
+      }
+    }
+  }
+
+  // If explicit LED state broadcasted from ESP32
+  if (led && typeof led === 'string') {
+    const upper = led.toUpperCase();
+    if (upper === 'RED' || upper === 'GREEN' || upper === 'OFF') {
+      updateLedUI(upper);
+    }
+  }
+
+  if (sensing !== undefined && Boolean(sensing) !== state.isSensing && !state.taskCompleted) {
+    state.isSensing = Boolean(sensing);
+    updateSensingUI(state.isSensing);
+  }
+
+  // Store in historical record for graph & CSV export
   const now = new Date();
-  const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
+  const timeStr = now.toTimeString().split(' ')[0];
+  state.history.push({
+    timestamp: now.getTime(),
+    timeStr: timeStr,
+    res: state.currentResistance,
+    threshold: state.resistanceThreshold,
+    vac: state.vacuumLevel,
+    isSensing: state.isSensing,
+    systemPower: state.systemPower,
+    led: state.ledState
+  });
 
-  const line = document.createElement('div');
-  line.className = `log-line ${type}`;
-
-  const timeSpan = document.createElement('span');
-  timeSpan.className = 'log-time';
-  timeSpan.textContent = `[${timeStr}]`;
-
-  const tagSpan = document.createElement('span');
-  tagSpan.className = `log-tag tag-${type}`;
-  tagSpan.textContent = tag;
-
-  const msgSpan = document.createElement('span');
-  msgSpan.className = 'log-msg';
-  msgSpan.textContent = message;
-
-  line.appendChild(timeSpan);
-  line.appendChild(tagSpan);
-  line.appendChild(msgSpan);
-
-  ui.terminalBody.appendChild(line);
-
-  // Auto scroll to bottom
-  ui.terminalBody.scrollTop = ui.terminalBody.scrollHeight;
-
-  // Trim logs if too long
-  if (ui.terminalBody.children.length > 500) {
-    ui.terminalBody.removeChild(ui.terminalBody.firstElementChild);
+  if (state.history.length > state.maxHistoryPoints) {
+    state.history.shift();
   }
 }
 
-// --- Session Timer ---
-function startSessionTimer() {
-  state.sessionStartTime = Date.now();
-  if (state.timerInterval) clearInterval(state.timerInterval);
-  state.timerInterval = setInterval(() => {
-    if (!state.sessionStartTime) return;
-    const diff = Math.floor((Date.now() - state.sessionStartTime) / 1000);
-    const hrs = String(Math.floor(diff / 3600)).padStart(2, '0');
-    const mins = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
-    const secs = String(diff % 60).padStart(2, '0');
-    ui.valSessionTime.textContent = `${hrs}:${mins}:${secs}`;
-  }, 1000);
-}
+function updateResistanceMetrics(res) {
+  ui.valResistance.textContent = res.toFixed(1);
 
-function stopSessionTimer() {
-  if (state.timerInterval) {
-    clearInterval(state.timerInterval);
-    state.timerInterval = null;
+  const pct = Math.min(100, Math.max(0, (res / state.resistanceThreshold) * 100));
+  ui.resistanceThresholdBar.style.width = `${pct}%`;
+  ui.resistancePctLabel.textContent = `${pct.toFixed(0)}% of Cutoff`;
+
+  if (pct >= 100) {
+    ui.resistanceThresholdBar.className = 'progress-bar-fill fill-rose';
+    ui.valResistance.className = 'metric-value text-alert';
+  } else {
+    ui.resistanceThresholdBar.className = 'progress-bar-fill fill-cyan';
+    ui.valResistance.className = 'metric-value text-accent';
   }
+
+  const remaining = Math.max(0, state.resistanceThreshold - res);
+  ui.valRemainingMargin.textContent = `${remaining.toFixed(1)} Ω`;
 }
 
-// --- Bluetooth Connection Management ---
-async function requestBleDevice() {
+// --- Web Bluetooth API Connection ---
+async function connectBle() {
   if (!navigator.bluetooth) {
-    appendLog('ERR', 'Web Bluetooth API is not supported in this browser. Please use Chrome, Edge, or Opera over HTTPS or localhost.', 'err');
-    alert('Web Bluetooth is not supported or enabled in this browser. Please open in Google Chrome or Microsoft Edge.');
+    alert('Web Bluetooth API is not supported in this browser. Please use Google Chrome, Microsoft Edge, or Opera.');
+    appendLog('ERR', 'Web Bluetooth API not supported.', 'err');
     return;
   }
 
   try {
-    updateConnectionUI('connecting', 'Connecting...');
-    appendLog('SYS', 'Opening Web Bluetooth device picker...', 'sys');
-
-    const serviceUuid = state.serviceUuid.toLowerCase();
+    appendLog('SYS', 'Requesting Web Bluetooth device scan...', 'sys');
+    const serviceUuid = state.serviceUuid;
 
     const options = {
-      filters: [
-        { namePrefix: state.namePrefix || 'Particle' }
-      ],
+      filters: [{ namePrefix: state.namePrefix || 'Particle' }],
       optionalServices: [serviceUuid]
     };
 
-    // If no prefix, accept all devices with optionalServices
     if (!state.namePrefix.trim()) {
       delete options.filters;
       options.acceptAllDevices = true;
     }
 
     state.device = await navigator.bluetooth.requestDevice(options);
-    appendLog('SYS', `Selected device: ${state.device.name || 'Unnamed ESP32'} (ID: ${state.device.id})`, 'sys');
+    appendLog('SYS', `Selected device: ${state.device.name || 'ESP32 Collector'} (ID: ${state.device.id})`, 'sys');
 
     state.device.addEventListener('gattserverdisconnected', onDisconnected);
 
@@ -209,14 +553,13 @@ async function requestBleDevice() {
     appendLog('SYS', 'Connecting to GATT Server...', 'sys');
     state.server = await state.device.gatt.connect();
 
-    // Get Primary Service
+    // Get Primary Nordic UART Service
     appendLog('SYS', `Getting Primary Service: ${serviceUuid}`, 'sys');
     const service = await state.server.getPrimaryService(serviceUuid);
 
-    // Get Characteristics
-    appendLog('SYS', 'Discovering RX & TX Characteristics...', 'sys');
+    // Get RX Notification Characteristic
     try {
-      state.rxCharacteristic = await service.getCharacteristic(state.rxUuid.toLowerCase());
+      state.rxCharacteristic = await service.getCharacteristic(state.rxUuid);
       await state.rxCharacteristic.startNotifications();
       state.rxCharacteristic.addEventListener('characteristicvaluechanged', handleIncomingBleData);
       appendLog('SYS', 'Subscribed to BLE RX notifications.', 'sys');
@@ -224,8 +567,9 @@ async function requestBleDevice() {
       appendLog('WARN', `Could not subscribe to RX characteristic: ${err.message}`, 'warn');
     }
 
+    // Get TX Command Write Characteristic
     try {
-      state.txCharacteristic = await service.getCharacteristic(state.txUuid.toLowerCase());
+      state.txCharacteristic = await service.getCharacteristic(state.txUuid);
       appendLog('SYS', 'Obtained TX characteristic for firmware commands.', 'sys');
     } catch (err) {
       appendLog('WARN', `TX Characteristic not found: ${err.message}`, 'warn');
@@ -233,8 +577,7 @@ async function requestBleDevice() {
 
     state.isConnected = true;
     updateConnectionUI('connected', state.device.name || 'ESP32 Connected');
-    appendLog('SYS', 'ESP32 Ingestive Particle Collector paired successfully!', 'sys');
-    startSessionTimer();
+    appendLog('SYS', 'ESP32 Particle Collector connected successfully!', 'sys');
 
   } catch (error) {
     appendLog('ERR', `BLE Connection failed: ${error.message}`, 'err');
@@ -254,8 +597,6 @@ function updateConnectionUI(status, label) {
       </svg>
       <span>Disconnect</span>
     `;
-    ui.valDeviceState.textContent = 'ACTIVE';
-    ui.valDeviceState.className = 'metric-tag success';
   } else {
     ui.bleConnectBtn.classList.remove('connected');
     ui.bleConnectBtn.innerHTML = `
@@ -264,10 +605,6 @@ function updateConnectionUI(status, label) {
       </svg>
       <span>Connect ESP32</span>
     `;
-    if (!state.isSimulating) {
-      ui.valDeviceState.textContent = 'STANDBY';
-      ui.valDeviceState.className = 'metric-tag';
-    }
   }
 }
 
@@ -286,10 +623,9 @@ function onDisconnected() {
   state.txCharacteristic = null;
   updateConnectionUI('disconnected', 'Disconnected');
   appendLog('WARN', 'ESP32 Bluetooth connection terminated.', 'warn');
-  stopSessionTimer();
 }
 
-// --- Sending Commands to ESP32 Firmware ---
+// --- Transmit Commands to ESP32 Firmware ---
 async function sendCommand(commandText) {
   const trimmed = commandText.trim();
   if (!trimmed) return;
@@ -305,47 +641,18 @@ async function sendCommand(commandText) {
       appendLog('ERR', `Write error: ${err.message}`, 'err');
     }
   } else if (state.isSimulating) {
-    // Handle simulated replies
     setTimeout(() => {
       handleSimulatedCommand(trimmed);
-    }, 150);
+    }, 120);
   } else {
-    appendLog('WARN', 'Device not connected. Connect ESP32 or enable Simulation Mode.', 'warn');
+    // If not connected and not simulating
+    if (!trimmed.startsWith('STATUS')) {
+      appendLog('WARN', 'Command queued locally (connect ESP32 or enable Simulation Mode to execute).', 'warn');
+    }
   }
 }
 
-function handleSimulatedCommand(cmd) {
-  const upper = cmd.toUpperCase();
-  if (upper === 'START') {
-    state.deviceStatus = 'SAMPLING';
-    ui.valDeviceState.textContent = 'SAMPLING';
-    ui.valDeviceState.className = 'metric-tag success';
-    appendLog('RX', 'ACK: START - Particle collector sampling initiated.', 'rx');
-  } else if (upper === 'STOP') {
-    state.deviceStatus = 'PAUSED';
-    ui.valDeviceState.textContent = 'PAUSED';
-    ui.valDeviceState.className = 'metric-tag';
-    appendLog('RX', 'ACK: STOP - Particle collector sampling halted.', 'rx');
-  } else if (upper === 'TARE') {
-    appendLog('RX', 'ACK: TARE - Baseline optical offset zeroed.', 'rx');
-  } else if (upper === 'CALIBRATE') {
-    appendLog('RX', 'ACK: CALIBRATE - Laser intensity recalibrated (Gain: 1.04).', 'rx');
-  } else if (upper === 'FLUSH') {
-    state.deviceStatus = 'FLUSHING';
-    ui.valDeviceState.textContent = 'FLUSHING';
-    ui.valDeviceState.className = 'metric-tag info';
-    appendLog('RX', 'ACK: FLUSH - Purge valve opened for fluid cleaning cycle.', 'rx');
-    setTimeout(() => {
-      state.deviceStatus = 'SAMPLING';
-      ui.valDeviceState.textContent = 'SAMPLING';
-      ui.valDeviceState.className = 'metric-tag success';
-    }, 3000);
-  } else {
-    appendLog('RX', `ACK: Received '${cmd}'`, 'rx');
-  }
-}
-
-// --- Incoming Data Stream Handler ---
+// --- Handle Incoming BLE Data Stream ---
 let rxBuffer = '';
 function handleIncomingBleData(event) {
   const value = event.target.value;
@@ -354,7 +661,7 @@ function handleIncomingBleData(event) {
 
   rxBuffer += chunk;
   const lines = rxBuffer.split('\n');
-  rxBuffer = lines.pop(); // Keep incomplete trailing fragment in buffer
+  rxBuffer = lines.pop(); // Retain incomplete trailing fragment
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -366,37 +673,30 @@ function handleIncomingBleData(event) {
 function processIncomingLine(line) {
   appendLog('RX', line, 'rx');
 
-  // Try parsing JSON telemetry
+  // Try parsing JSON telemetry packet
   if (line.startsWith('{') && line.endsWith('}')) {
     try {
       const data = JSON.parse(line);
-      applyTelemetryData({
-        count: data.count !== undefined ? data.count : state.particleCount + 1,
-        conc: data.conc !== undefined ? data.conc : state.concentration,
-        flow: data.flow !== undefined ? data.flow : state.flowRate,
-        volt: data.volt !== undefined ? data.volt : state.sensorVoltage,
-        size: data.size || 'micro'
-      });
+      applyTelemetryData(data);
       return;
     } catch (e) {
-      // not JSON, fallback to CSV / Key-value
+      // not JSON, fallback to comma/key-value
     }
   }
 
-  // Key-value parsing (e.g. C:120,CONC:14.2,F:12.1,V:3.28)
+  // Key-value parsing (e.g. R:845.2,VAC:3,LED:GREEN)
   if (line.includes(':')) {
     const parts = line.split(',');
     const parsed = {};
     for (const part of parts) {
       const [k, v] = part.split(':').map(s => s.trim());
       if (k && v) {
-        const num = parseFloat(v);
-        if (!isNaN(num)) {
-          if (k.match(/^c(ount)?$/i)) parsed.count = num;
-          if (k.match(/^conc(entration)?$/i)) parsed.conc = num;
-          if (k.match(/^f(low)?$/i)) parsed.flow = num;
-          if (k.match(/^v(olt(age)?)?$/i)) parsed.volt = num;
-        }
+        if (k.match(/^r(es(istance)?)?$/i)) parsed.res = parseFloat(v);
+        if (k.match(/^t(hresh(old)?)?$/i)) parsed.thresh = parseFloat(v);
+        if (k.match(/^v(ac(uum)?)?$/i)) parsed.vac = parseInt(v, 10);
+        if (k.match(/^led$/i)) parsed.led = v.toUpperCase();
+        if (k.match(/^p(wr|ower)?$/i)) parsed.power = (v === '1' || v.toUpperCase() === 'ON');
+        if (k.match(/^s(ense|ensing)?$/i)) parsed.sensing = (v === '1' || v.toUpperCase() === 'START');
       }
     }
     if (Object.keys(parsed).length > 0) {
@@ -404,241 +704,274 @@ function processIncomingLine(line) {
       return;
     }
   }
-}
 
-function applyTelemetryData({ count, conc, flow, volt, size }) {
-  const now = new Date();
-  const timeStr = now.toTimeString().split(' ')[0];
-
-  if (count !== undefined) state.particleCount = count;
-  if (conc !== undefined) {
-    state.concentration = conc;
-    if (conc > state.peakConcentration) {
-      state.peakConcentration = conc;
-      ui.valPeakConc.textContent = conc.toFixed(1);
+  // Raw CSV line fallback (e.g. "842.5,1000,3,GREEN")
+  if (line.includes(',')) {
+    const parts = line.split(',').map(s => s.trim());
+    const resVal = parseFloat(parts[0]);
+    if (!isNaN(resVal)) {
+      applyTelemetryData({
+        res: resVal,
+        thresh: parts[1] ? parseFloat(parts[1]) : state.resistanceThreshold,
+        vac: parts[2] ? parseInt(parts[2], 10) : state.vacuumLevel,
+        led: parts[3] ? parts[3].toUpperCase() : undefined
+      });
     }
   }
-  if (flow !== undefined) state.flowRate = flow;
-  if (volt !== undefined) state.sensorVoltage = volt;
+}
 
-  // Classify particle size
-  if (size) {
-    if (size === 'micro') state.bins.micro++;
-    else if (size === 'medium') state.bins.medium++;
-    else if (size === 'macro') state.bins.macro++;
+// --- Realistic Hardware Simulation Mode ---
+function toggleDemoMode() {
+  state.isSimulating = !state.isSimulating;
+
+  if (state.isSimulating) {
+    ui.demoModeToggle.classList.add('sim-active');
+    ui.demoToggleLabel.textContent = 'Stop Simulation';
+    appendLog('SYS', 'Hardware Simulation Mode ENABLED. Powering ON simulated ESP32.', 'sys');
+
+    // Automatically power on in simulation for instant feedback
+    updatePowerUI(true);
+
+    let simResistance = 180.0; // Start at baseline resistance
+    state.simInterval = setInterval(() => {
+      if (!state.isSimulating) return;
+
+      if (state.systemPower && state.isSensing && !state.taskCompleted) {
+        // Resistance increases as vacuum pulls particles onto the collector
+        // Higher vacuum level = faster particle deposition rate!
+        const depositionSpeed = state.vacuumLevel * 14.0; // Ω per sec
+        const noise = (Math.random() - 0.45) * 5.0;
+        simResistance += (depositionSpeed * 0.25) + noise;
+
+        if (simResistance < 50) simResistance = 50;
+
+        applyTelemetryData({
+          res: simResistance,
+          thresh: state.resistanceThreshold,
+          vac: state.vacuumLevel,
+          power: true,
+          sensing: true,
+          led: simResistance >= state.resistanceThreshold ? 'RED' : 'GREEN'
+        });
+      } else {
+        // Idling baseline with gentle thermal drift
+        const idleNoise = (Math.random() - 0.5) * 0.4;
+        applyTelemetryData({
+          res: Math.max(0, simResistance + idleNoise),
+          thresh: state.resistanceThreshold,
+          vac: state.vacuumLevel,
+          power: state.systemPower,
+          sensing: state.isSensing,
+          led: state.taskCompleted ? 'RED' : (state.isSensing ? 'GREEN' : 'OFF')
+        });
+      }
+    }, 250); // 4 Hz broadcast rate
+
   } else {
-    // Estimate size bin based on optical voltage pulse amplitude
-    const rand = Math.random();
-    if (rand < 0.65) state.bins.micro++;
-    else if (rand < 0.9) state.bins.medium++;
-    else state.bins.macro++;
+    ui.demoModeToggle.classList.remove('sim-active');
+    ui.demoToggleLabel.textContent = 'Start Simulation';
+    if (state.simInterval) {
+      clearInterval(state.simInterval);
+      state.simInterval = null;
+    }
+    appendLog('SYS', 'Hardware Simulation Mode DISABLED.', 'sys');
   }
-
-  // Record point in history
-  const point = {
-    timestamp: Date.now(),
-    timeStr,
-    count: state.particleCount,
-    conc: state.concentration,
-    flow: state.flowRate,
-    volt: state.sensorVoltage
-  };
-
-  state.history.push(point);
-  if (state.history.length > state.maxHistoryPoints) {
-    state.history.shift();
-  }
-
-  updateMetricsUI();
 }
 
-function updateMetricsUI() {
-  ui.valParticleCount.textContent = state.particleCount.toLocaleString();
-  ui.valConcentration.textContent = state.concentration.toFixed(1);
-  ui.valFlowRate.textContent = state.flowRate.toFixed(1);
-  ui.valSensorVoltage.textContent = state.sensorVoltage.toFixed(2);
-
-  // Rate badge calculation (particles in last 3 seconds)
-  if (state.history.length > 3) {
-    const recent = state.history.slice(-3);
-    const deltaCount = recent[recent.length - 1].count - recent[0].count;
-    const deltaSec = (recent[recent.length - 1].timestamp - recent[0].timestamp) / 1000;
-    const rate = deltaSec > 0 ? Math.max(0, Math.round(deltaCount / deltaSec)) : 0;
-    ui.rateBadge.textContent = `+${rate} /s`;
+function handleSimulatedCommand(cmd) {
+  const upper = cmd.toUpperCase();
+  if (upper === 'POWER:ON') {
+    updatePowerUI(true);
+    appendLog('RX', 'ACK: POWER:ON - Main ESP32 hardware powered.', 'rx');
+  } else if (upper === 'POWER:OFF') {
+    updatePowerUI(false);
+    appendLog('RX', 'ACK: POWER:OFF - System powered down.', 'rx');
+  } else if (upper === 'SENSE:START') {
+    startSensing();
+    appendLog('RX', `ACK: SENSE:START - Vacuum engaged at Level ${state.vacuumLevel}. Green LED ON.`, 'rx');
+  } else if (upper === 'SENSE:STOP') {
+    stopSensing();
+    appendLog('RX', 'ACK: SENSE:STOP - Vacuum halted. Sensing standby.', 'rx');
+  } else if (upper.startsWith('VAC:')) {
+    const lvl = parseInt(upper.split(':')[1], 10);
+    updateVacuumUI(lvl);
+    appendLog('RX', `ACK: VAC:${lvl} - Motor PWM duty adjusted to ${lvl * 20}%.`, 'rx');
+  } else if (upper === 'TARE') {
+    resetTaskCycle();
+    appendLog('RX', 'ACK: TARE - Baseline circuit offset zeroed.', 'rx');
+  } else if (upper.startsWith('SET_THRESH:')) {
+    const val = parseFloat(upper.split(':')[1]);
+    state.resistanceThreshold = val;
+    appendLog('RX', `ACK: SET_THRESH - Threshold updated to ${val} Ω.`, 'rx');
+  } else {
+    appendLog('RX', `ACK: Command '${cmd}' processed.`, 'rx');
   }
-
-  // Update bin progress bars
-  const totalBins = state.bins.micro + state.bins.medium + state.bins.macro || 1;
-  const microPct = Math.round((state.bins.micro / totalBins) * 100);
-  const medPct = Math.round((state.bins.medium / totalBins) * 100);
-  const macroPct = Math.round((state.bins.macro / totalBins) * 100);
-
-  ui.binMicroCount.textContent = state.bins.micro;
-  ui.binMicroBar.style.width = `${microPct}%`;
-
-  ui.binMedCount.textContent = state.bins.medium;
-  ui.binMedBar.style.width = `${medPct}%`;
-
-  ui.binMacroCount.textContent = state.bins.macro;
-  ui.binMacroBar.style.width = `${macroPct}%`;
 }
 
-// --- Realtime Canvas Rendering ---
-function renderChart() {
-  requestAnimationFrame(renderChart);
-  if (state.isChartPaused) return;
+// --- Session Elapsed Timer ---
+function startSessionTimer() {
+  if (state.timerInterval) clearInterval(state.timerInterval);
+  state.sessionStartTime = Date.now();
+  state.timerInterval = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - state.sessionStartTime) / 1000);
+    const hrs = String(Math.floor(elapsed / 3600)).padStart(2, '0');
+    const mins = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
+    const secs = String(elapsed % 60).padStart(2, '0');
+    ui.valSessionTime.textContent = `${hrs}:${mins}:${secs}`;
+  }, 1000);
+}
 
-  const w = canvasWidth;
-  const h = canvasHeight;
+function stopSessionTimer() {
+  if (state.timerInterval) {
+    clearInterval(state.timerInterval);
+    state.timerInterval = null;
+  }
+}
 
-  ctx.clearRect(0, 0, w, h);
+// --- Real-time 60 FPS HTML5 Canvas Chart: Resistance Over Time ---
+function startChartRenderLoop() {
+  function render() {
+    if (!state.isChartPaused) {
+      drawResistanceChart();
+    }
+    animationFrameId = requestAnimationFrame(render);
+  }
+  animationFrameId = requestAnimationFrame(render);
+}
 
-  // Grid background lines
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.08)';
+function drawResistanceChart() {
+  const width = ui.canvas.clientWidth;
+  const height = ui.canvas.clientHeight;
+
+  ctx.clearRect(0, 0, width, height);
+
+  const paddingLeft = 60;
+  const paddingRight = 24;
+  const paddingTop = 20;
+  const paddingBottom = 30;
+
+  const chartW = width - paddingLeft - paddingRight;
+  const chartH = height - paddingTop - paddingBottom;
+
+  // Determine dynamic Y-axis maximum
+  let maxRes = state.resistanceThreshold * 1.25; // default scale slightly above cutoff
+  for (const pt of state.history) {
+    if (pt.res > maxRes) maxRes = pt.res * 1.15;
+  }
+  const minRes = 0;
+
+  // Draw Horizontal Gridlines & Y-Axis Labels
   ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.08)';
+  ctx.fillStyle = '#64748b';
+  ctx.font = '10px "JetBrains Mono", monospace';
+  ctx.textAlign = 'right';
 
-  const gridStepsY = 4;
-  for (let i = 0; i <= gridStepsY; i++) {
-    const y = (h / gridStepsY) * i;
+  const gridSteps = 4;
+  for (let i = 0; i <= gridSteps; i++) {
+    const val = minRes + (maxRes - minRes) * (i / gridSteps);
+    const y = paddingTop + chartH - (i / gridSteps) * chartH;
+
     ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(w, y);
+    ctx.moveTo(paddingLeft, y);
+    ctx.lineTo(paddingLeft + chartW, y);
     ctx.stroke();
+
+    ctx.fillText(`${Math.round(val)} Ω`, paddingLeft - 8, y + 3);
   }
 
-  const gridStepsX = 8;
-  for (let i = 0; i <= gridStepsX; i++) {
-    const x = (w / gridStepsX) * i;
+  // Draw Horizontal Autonomous Cutoff Threshold Line (e.g. 1000 Ω)
+  const threshY = paddingTop + chartH - ((state.resistanceThreshold - minRes) / (maxRes - minRes)) * chartH;
+  if (threshY >= paddingTop && threshY <= paddingTop + chartH) {
+    ctx.save();
+    ctx.strokeStyle = '#f43f5e';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 6]);
+    ctx.shadowColor = 'rgba(244, 63, 94, 0.6)';
+    ctx.shadowBlur = 8;
+
     ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h);
+    ctx.moveTo(paddingLeft, threshY);
+    ctx.lineTo(paddingLeft + chartW, threshY);
     ctx.stroke();
+
+    // Threshold Marker Label
+    ctx.fillStyle = '#fda4af';
+    ctx.font = 'bold 10px "Outfit", sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(`CUTOFF THRESHOLD: ${state.resistanceThreshold.toLocaleString()} Ω`, paddingLeft + chartW - 6, threshY - 6);
+    ctx.restore();
   }
+
+  // Draw Time X-Axis
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.15)';
+  ctx.beginPath();
+  ctx.moveTo(paddingLeft, paddingTop + chartH);
+  ctx.lineTo(paddingLeft + chartW, paddingTop + chartH);
+  ctx.stroke();
 
   if (state.history.length < 2) {
-    ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
-    ctx.font = '12px Outfit, sans-serif';
+    // Empty state prompt
+    ctx.fillStyle = '#475569';
+    ctx.font = '13px "Outfit", sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('Awaiting live ESP32 particle telemetry stream...', w / 2, h / 2);
+    ctx.fillText('Awaiting resistance telemetry stream... Click "Connect ESP32" or "Start Simulation"', paddingLeft + chartW / 2, paddingTop + chartH / 2);
     return;
   }
 
+  // Plot Resistance Waveform
   const points = state.history;
-  const maxConc = Math.max(50, ...points.map(p => p.conc)) * 1.15;
-  const maxVolt = 5.0; // 0-5V sensor scale
+  const numPoints = points.length;
 
-  // Function to map values
-  const getX = (i) => (i / (state.maxHistoryPoints - 1)) * w;
-  const getYConc = (val) => h - (val / maxConc) * (h - 20) - 10;
-  const getYVolt = (val) => h - (val / maxVolt) * (h - 20) - 10;
-
-  // 1. Draw Raw Optical Signal (Violet Line)
-  ctx.beginPath();
-  ctx.strokeStyle = '#8b5cf6';
-  ctx.lineWidth = 1.5;
-  points.forEach((p, i) => {
-    const x = getX(i);
-    const y = getYVolt(p.volt);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-
-  // 2. Draw Concentration Area Gradient & Line (Cyan)
-  const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, 'rgba(6, 182, 212, 0.35)');
-  grad.addColorStop(1, 'rgba(6, 182, 212, 0.0)');
-
-  ctx.beginPath();
-  points.forEach((p, i) => {
-    const x = getX(i);
-    const y = getYConc(p.conc);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.lineTo(getX(points.length - 1), h);
-  ctx.lineTo(getX(0), h);
-  ctx.closePath();
-  ctx.fillStyle = grad;
-  ctx.fill();
-
+  ctx.save();
   ctx.beginPath();
   ctx.strokeStyle = '#06b6d4';
   ctx.lineWidth = 2.5;
-  points.forEach((p, i) => {
-    const x = getX(i);
-    const y = getYConc(p.conc);
-    if (i === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
+  ctx.shadowColor = 'rgba(6, 182, 212, 0.6)';
+  ctx.shadowBlur = 10;
+
+  for (let i = 0; i < numPoints; i++) {
+    const x = paddingLeft + (i / (numPoints - 1)) * chartW;
+    const normY = (points[i].res - minRes) / (maxRes - minRes);
+    const y = paddingTop + chartH - (normY * chartH);
+
+    if (i === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
   ctx.stroke();
 
-  // Highlight latest point
-  const lastIndex = points.length - 1;
-  const lastX = getX(lastIndex);
-  const lastY = getYConc(points[lastIndex].conc);
+  // Gradient fill under the curve
+  ctx.lineTo(paddingLeft + chartW, paddingTop + chartH);
+  ctx.lineTo(paddingLeft, paddingTop + chartH);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, paddingTop, 0, paddingTop + chartH);
+  grad.addColorStop(0, 'rgba(6, 182, 212, 0.25)');
+  grad.addColorStop(1, 'rgba(6, 182, 212, 0.0)');
+  ctx.fillStyle = grad;
+  ctx.shadowBlur = 0;
+  ctx.fill();
+  ctx.restore();
+
+  // Draw Latest Value Pulse Dot
+  const lastIndex = numPoints - 1;
+  const lastPt = points[lastIndex];
+  const lastX = paddingLeft + chartW;
+  const lastNormY = (lastPt.res - minRes) / (maxRes - minRes);
+  const lastY = paddingTop + chartH - (lastNormY * chartH);
+
+  ctx.save();
+  const isOver = lastPt.res >= state.resistanceThreshold;
+  ctx.fillStyle = isOver ? '#f43f5e' : '#06b6d4';
+  ctx.shadowColor = isOver ? '#f43f5e' : '#06b6d4';
+  ctx.shadowBlur = 14;
 
   ctx.beginPath();
-  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
-  ctx.fillStyle = '#06b6d4';
+  ctx.arc(lastX, lastY, 5, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-}
-requestAnimationFrame(renderChart);
-
-// --- Simulation Mode ---
-function toggleSimulation() {
-  if (state.isSimulating) {
-    // Stop simulation
-    clearInterval(state.simInterval);
-    state.simInterval = null;
-    state.isSimulating = false;
-    ui.demoModeToggle.classList.remove('btn-primary');
-    ui.demoModeToggle.classList.add('btn-secondary');
-    ui.demoToggleLabel.textContent = 'Start Simulation';
-    updateConnectionUI('disconnected', 'Disconnected');
-    appendLog('SYS', 'Simulation mode stopped.', 'sys');
-    stopSessionTimer();
-  } else {
-    // Disconnect real BLE if active
-    if (state.isConnected) disconnectBle();
-
-    state.isSimulating = true;
-    ui.demoModeToggle.classList.remove('btn-secondary');
-    ui.demoModeToggle.classList.add('btn-primary');
-    ui.demoToggleLabel.textContent = 'Stop Simulation';
-    updateConnectionUI('connected', 'Simulated ESP32 (Virtual BLE)');
-    appendLog('SYS', 'Hardware simulation active. Emulating optical particle detection stream...', 'sys');
-    startSessionTimer();
-
-    let simCount = state.particleCount || 24;
-    let baseConc = 18.0;
-
-    state.simInterval = setInterval(() => {
-      // Simulate realistic ingestive particle flow burst
-      const isBurst = Math.random() < 0.2;
-      const countInc = isBurst ? Math.floor(Math.random() * 8) + 3 : Math.floor(Math.random() * 2) + 1;
-      simCount += countInc;
-
-      const noise = (Math.random() - 0.5) * 6;
-      const burstConc = isBurst ? Math.random() * 35 : 0;
-      const conc = Math.max(1.0, baseConc + noise + burstConc);
-      const volt = Math.min(4.8, 2.5 + (conc / 80) + (Math.random() * 0.2));
-      const flow = 12.0 + (Math.random() - 0.5) * 1.2;
-
-      // Simulated JSON packet like ESP32 produces
-      const simulatedPacket = {
-        count: simCount,
-        conc: parseFloat(conc.toFixed(2)),
-        flow: parseFloat(flow.toFixed(1)),
-        volt: parseFloat(volt.toFixed(2))
-      };
-
-      processIncomingLine(JSON.stringify(simulatedPacket));
-    }, 400);
-  }
+  ctx.restore();
 }
 
 // --- Data Export (CSV & JSON) ---
@@ -648,14 +981,14 @@ function exportCsv() {
     return;
   }
 
-  let csv = 'Timestamp,Time,ParticleCount,Concentration_p_mL,FlowRate_mL_min,SensorVoltage_V\n';
+  let csv = 'Timestamp,Time,Resistance_Ohms,Threshold_Ohms,VacuumLevel,SensingActive,SystemPower,LedState\n';
   state.history.forEach(p => {
-    csv += `${p.timestamp},${p.timeStr},${p.count},${p.conc},${p.flow},${p.volt}\n`;
+    csv += `${p.timestamp},${p.timeStr},${p.res},${p.threshold},${p.vac},${p.isSensing ? 1 : 0},${p.systemPower ? 1 : 0},${p.led}\n`;
   });
 
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  downloadBlob(blob, `particle_collector_${Date.now()}.csv`);
-  appendLog('SYS', 'Telemetry session exported to CSV.', 'sys');
+  downloadBlob(blob, `particle_collector_resistance_${Date.now()}.csv`);
+  appendLog('SYS', 'Resistance telemetry session exported to CSV.', 'sys');
 }
 
 function exportJson() {
@@ -667,17 +1000,21 @@ function exportJson() {
   const exportPayload = {
     sessionTimestamp: Date.now(),
     device: state.device ? state.device.name : 'Simulated ESP32',
-    metrics: {
-      totalParticles: state.particleCount,
-      peakConcentration: state.peakConcentration,
-      finalFlowRate: state.flowRate,
-      bins: state.bins
+    configuration: {
+      resistanceThreshold: state.resistanceThreshold,
+      vacuumLevel: state.vacuumLevel,
+      systemPower: state.systemPower
+    },
+    finalState: {
+      resistance: state.currentResistance,
+      taskCompleted: state.taskCompleted,
+      ledState: state.ledState
     },
     dataPoints: state.history
   };
 
   const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' });
-  downloadBlob(blob, `particle_collector_${Date.now()}.json`);
+  downloadBlob(blob, `particle_collector_resistance_${Date.now()}.json`);
   appendLog('SYS', 'Telemetry session exported to JSON.', 'sys');
 }
 
@@ -692,88 +1029,30 @@ function downloadBlob(blob, filename) {
   URL.revokeObjectURL(url);
 }
 
-// --- Event Listeners Initialization ---
-function initEvents() {
-  // BLE Connection Button
-  ui.bleConnectBtn.addEventListener('click', () => {
-    if (state.isConnected) {
-      disconnectBle();
-    } else {
-      requestBleDevice();
-    }
-  });
+// --- Terminal Logging Utility ---
+function appendLog(tag, msg, type = 'sys') {
+  const line = document.createElement('div');
+  line.className = `log-line ${type}`;
 
-  // Demo Simulation Toggle
-  ui.demoModeToggle.addEventListener('click', toggleSimulation);
+  const now = new Date();
+  const timeStr = now.toTimeString().split(' ')[0];
 
-  // Terminal Command Submission
-  ui.terminalForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const val = ui.terminalInput.value;
-    if (val) {
-      sendCommand(val);
-      ui.terminalInput.value = '';
-    }
-  });
+  line.innerHTML = `
+    <span class="log-time">[${timeStr}]</span>
+    <span class="log-tag tag-${type}">${tag}</span>
+    <span class="log-msg">${escapeHtml(msg)}</span>
+  `;
 
-  // Quick Command Pills
-  document.querySelectorAll('.cmd-pill').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const cmd = btn.dataset.cmd;
-      if (cmd) sendCommand(cmd);
-    });
-  });
+  ui.terminalBody.appendChild(line);
+  ui.terminalBody.scrollTop = ui.terminalBody.scrollHeight;
+}
 
-  // Terminal Controls
-  ui.clearTermBtn.addEventListener('click', () => {
-    ui.terminalBody.innerHTML = '';
-    appendLog('SYS', 'Terminal buffer cleared.', 'sys');
-  });
-
-  // Chart Controls
-  ui.pauseBtn.addEventListener('click', () => {
-    state.isChartPaused = !state.isChartPaused;
-    ui.pauseBtnText.textContent = state.isChartPaused ? 'Resume' : 'Pause';
-    appendLog('SYS', state.isChartPaused ? 'Chart stream paused.' : 'Chart stream resumed.', 'sys');
-  });
-
-  ui.resetChartBtn.addEventListener('click', () => {
-    state.history = [];
-    appendLog('SYS', 'Chart history buffer cleared.', 'sys');
-  });
-
-  // Export Buttons
-  ui.exportCsvBtn.addEventListener('click', exportCsv);
-  ui.exportJsonBtn.addEventListener('click', exportJson);
-
-  // Settings Modal Handlers
-  ui.settingsBtn.addEventListener('click', () => {
-    ui.settingsModal.style.display = 'flex';
-  });
-
-  ui.settingsCloseBtn.addEventListener('click', () => {
-    ui.settingsModal.style.display = 'none';
-  });
-
-  ui.settingsModal.addEventListener('click', (e) => {
-    if (e.target === ui.settingsModal) {
-      ui.settingsModal.style.display = 'none';
-    }
-  });
-
-  ui.settingsSaveBtn.addEventListener('click', () => {
-    state.serviceUuid = ui.cfgServiceUuid.value.trim();
-    state.rxUuid = ui.cfgRxUuid.value.trim();
-    state.txUuid = ui.cfgTxUuid.value.trim();
-    state.namePrefix = ui.cfgNameFilter.value.trim();
-    state.autoReconnect = ui.cfgAutoReconnect.value === 'true';
-    ui.settingsModal.style.display = 'none';
-    appendLog('SYS', 'Updated Bluetooth settings.', 'sys');
-  });
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 // Start application
-document.addEventListener('DOMContentLoaded', () => {
-  initEvents();
-  appendLog('SYS', 'Web Bluetooth interface initialized. Modern dark theme active.', 'sys');
-});
+window.addEventListener('DOMContentLoaded', init);
