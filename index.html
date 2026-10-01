@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ingestive Particle Collector | ESP32 BLE Dashboard</title>
+  <meta name="description" content="Real-time Web Bluetooth telemetry dashboard and control interface for ESP32-powered Ingestive Particle Collector." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="9" />
+            <circle cx="8" cy="9" r="1.5" fill="currentColor" />
+            <circle cx="15" cy="8" r="2" fill="currentColor" />
+            <circle cx="13" cy="15" r="2.5" fill="currentColor" />
+            <path d="M12 3v3M12 18v3M3 12h3M18 12h3" stroke-linecap="round" />
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">Ingestive Particle Collector</h1>
+          <span class="brand-subtitle">ESP32 Web Bluetooth Lab Telemetry</span>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <!-- Live status indicator -->
+        <div class="connection-status disconnected" id="connection-status-pill">
+          <span class="status-dot"></span>
+          <span class="status-label" id="connection-status-text">Disconnected</span>
+        </div>
+
+        <button id="demo-mode-toggle" class="btn btn-secondary" title="Simulate incoming particle telemetry without hardware">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+          <span id="demo-toggle-label">Start Simulation</span>
+        </button>
+
+        <button id="ble-connect-btn" class="btn btn-primary">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="m7 7 10 10-5 5V2l5 5L7 17" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span>Connect ESP32</span>
+        </button>
+
+        <button id="settings-open-btn" class="btn btn-icon" title="BLE & System Settings">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="dashboard-grid">
+      <!-- Top Metric Cards -->
+      <section class="metrics-row">
+        <!-- Metric 1: Total Count -->
+        <div class="card metric-card">
+          <div class="metric-header">
+            <span class="metric-title">Cumulative Particle Count</span>
+            <span class="metric-badge" id="rate-badge">+0 /s</span>
+          </div>
+          <div class="metric-value-container">
+            <span class="metric-value" id="val-particle-count">0</span>
+            <span class="metric-unit">particles</span>
+          </div>
+          <div class="metric-subtext">Total detected during current sampling</div>
+        </div>
+
+        <!-- Metric 2: Particle Concentration -->
+        <div class="card metric-card">
+          <div class="metric-header">
+            <span class="metric-title">Particle Concentration</span>
+            <span class="metric-tag info">Live</span>
+          </div>
+          <div class="metric-value-container">
+            <span class="metric-value text-accent" id="val-concentration">0.0</span>
+            <span class="metric-unit">particles / mL</span>
+          </div>
+          <div class="metric-subtext">Peak recorded: <span id="val-peak-conc">0.0</span> p/mL</div>
+        </div>
+
+        <!-- Metric 3: Flow & Ingestion Speed -->
+        <div class="card metric-card">
+          <div class="metric-header">
+            <span class="metric-title">Fluid Intake Rate</span>
+            <span class="metric-tag" id="flow-status-tag">Optimal</span>
+          </div>
+          <div class="metric-value-container">
+            <span class="metric-value" id="val-flow-rate">0.0</span>
+            <span class="metric-unit">mL / min</span>
+          </div>
+          <div class="metric-subtext">Sensor Voltage: <span id="val-sensor-voltage">0.00</span> V</div>
+        </div>
+
+        <!-- Metric 4: Session State & Timer -->
+        <div class="card metric-card">
+          <div class="metric-header">
+            <span class="metric-title">Sampling Status</span>
+            <span class="metric-tag success" id="val-device-state">STANDBY</span>
+          </div>
+          <div class="metric-value-container">
+            <span class="metric-value font-mono" id="val-session-time">00:00:00</span>
+          </div>
+          <div class="metric-subtext">ESP32 RSSI: <span id="val-rssi">--</span> dBm</div>
+        </div>
+      </section>
+
+      <!-- Center Telemetry Chart & Particle Spectra -->
+      <section class="center-row">
+        <!-- Live Real-time Chart Card -->
+        <div class="card chart-card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <h2 class="card-title">Real-Time Particle Detection Stream</h2>
+              <span class="card-caption">Continuous optical sensor readings over BLE notification stream</span>
+            </div>
+            <div class="chart-controls">
+              <button id="chart-toggle-pause" class="btn btn-sm btn-ghost" title="Pause/Resume stream rendering">
+                <span id="pause-btn-text">Pause</span>
+              </button>
+              <button id="chart-reset-btn" class="btn btn-sm btn-ghost" title="Clear chart buffer">Clear</button>
+            </div>
+          </div>
+          <div class="chart-container">
+            <canvas id="telemetry-canvas"></canvas>
+            <div class="chart-legend">
+              <span class="legend-item"><span class="legend-bullet conc"></span> Instantaneous Concentration (p/mL)</span>
+              <span class="legend-item"><span class="legend-bullet raw"></span> Sensor Raw Optical Signal (mV)</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Particle Size Distribution Binning -->
+        <div class="card spectrum-card">
+          <div class="card-header">
+            <h2 class="card-title">Size Classification</h2>
+            <span class="card-caption">Estimated particle diameter</span>
+          </div>
+          <div class="spectrum-body">
+            <div class="bin-item">
+              <div class="bin-label-row">
+                <span>Micro (< 5 μm)</span>
+                <span id="bin-micro-count" class="font-mono">0</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill fill-cyan" id="bin-micro-bar" style="width: 0%"></div>
+              </div>
+            </div>
+
+            <div class="bin-item">
+              <div class="bin-label-row">
+                <span>Medium (5 – 25 μm)</span>
+                <span id="bin-med-count" class="font-mono">0</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill fill-emerald" id="bin-med-bar" style="width: 0%"></div>
+              </div>
+            </div>
+
+            <div class="bin-item">
+              <div class="bin-label-row">
+                <span>Macro (> 25 μm)</span>
+                <span id="bin-macro-count" class="font-mono">0</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill fill-violet" id="bin-macro-bar" style="width: 0%"></div>
+              </div>
+            </div>
+
+            <div class="collector-status-box">
+              <div class="box-title">Collector Mechanism</div>
+              <div class="status-grid">
+                <div class="status-cell">
+                  <span class="status-cell-label">Fluid Pump</span>
+                  <span class="status-cell-val" id="stat-pump">OFF</span>
+                </div>
+                <div class="status-cell">
+                  <span class="status-cell-label">Optical Laser</span>
+                  <span class="status-cell-val" id="stat-laser">ARMED</span>
+                </div>
+                <div class="status-cell">
+                  <span class="status-cell-label">Filter Valve</span>
+                  <span class="status-cell-val" id="stat-valve">OPEN</span>
+                </div>
+                <div class="status-cell">
+                  <span class="status-cell-label">Buffer Capacity</span>
+                  <span class="status-cell-val" id="stat-buffer">98% Free</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Bottom Serial Monitor / BLE Terminal Section -->
+      <section class="card terminal-card">
+        <div class="card-header">
+          <div class="card-title-group">
+            <h2 class="card-title">ESP32 Firmware Monitor & Control Terminal</h2>
+            <span class="card-caption">Direct bidirectional serial communication over BLE UART without Arduino IDE locks</span>
+          </div>
+          <div class="terminal-actions">
+            <button id="export-csv-btn" class="btn btn-sm btn-secondary" title="Export session data as CSV">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+              </svg>
+              Export CSV
+            </button>
+            <button id="export-json-btn" class="btn btn-sm btn-secondary" title="Export session data as JSON">Export JSON</button>
+            <button id="clear-term-btn" class="btn btn-sm btn-ghost" title="Clear terminal view">Clear</button>
+          </div>
+        </div>
+
+        <!-- Terminal Quick Action Commands -->
+        <div class="quick-commands">
+          <span class="quick-cmd-label">Quick Commands:</span>
+          <button class="cmd-pill" data-cmd="START">▶ START_COLLECTION</button>
+          <button class="cmd-pill" data-cmd="STOP">⏹ STOP_COLLECTION</button>
+          <button class="cmd-pill" data-cmd="TARE">⚖ TARE_SENSOR</button>
+          <button class="cmd-pill" data-cmd="CALIBRATE">⚙ CALIBRATE</button>
+          <button class="cmd-pill" data-cmd="FLUSH">💧 FLUSH_CHAMBER</button>
+          <button class="cmd-pill" data-cmd="STATUS">ℹ GET_STATUS</button>
+        </div>
+
+        <!-- Console Log Output -->
+        <div class="terminal-body" id="terminal-body">
+          <div class="log-line sys">
+            <span class="log-time">[SYSTEM]</span>
+            <span class="log-tag tag-sys">SYS</span>
+            <span class="log-msg">Web Bluetooth Workspace ready. Click "Connect ESP32" or "Start Simulation" to begin telemetry stream.</span>
+          </div>
+        </div>
+
+        <!-- Command Input Form -->
+        <form class="terminal-input-bar" id="terminal-cmd-form">
+          <span class="prompt-symbol">&gt;</span>
+          <input type="text" id="terminal-input" placeholder="Type custom firmware command (e.g. SET_FLOW:15.0 or PING)..." autocomplete="off" />
+          <button type="submit" class="btn btn-primary btn-sm">Send</button>
+        </form>
+      </section>
+    </main>
+
+    <!-- Settings Modal -->
+    <div class="modal-backdrop" id="settings-modal" style="display: none;">
+      <div class="modal-window">
+        <div class="modal-header">
+          <h3 class="modal-title">Bluetooth & Sensor Settings</h3>
+          <button class="modal-close-btn" id="settings-close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="cfg-service-uuid">BLE Service UUID</label>
+            <input type="text" id="cfg-service-uuid" value="6e400001-b5a3-f393-e0a9-e50e24dcca9e" />
+            <small class="form-help">Nordic UART Service default (used by ESP32 BLE UART libraries)</small>
+          </div>
+          <div class="form-group">
+            <label for="cfg-rx-uuid">RX Characteristic (ESP32 Notify to Web)</label>
+            <input type="text" id="cfg-rx-uuid" value="6e400003-b5a3-f393-e0a9-e50e24dcca9e" />
+          </div>
+          <div class="form-group">
+            <label for="cfg-tx-uuid">TX Characteristic (Web Write to ESP32)</label>
+            <input type="text" id="cfg-tx-uuid" value="6e400002-b5a3-f393-e0a9-e50e24dcca9e" />
+          </div>
+          <div class="form-group">
+            <label for="cfg-name-filter">Device Name Prefix Filter</label>
+            <input type="text" id="cfg-name-filter" value="Particle" placeholder="e.g. Particle, ESP32" />
+          </div>
+          <div class="form-row">
+            <div class="form-group half">
+              <label for="cfg-baud-rate">Target Baud Equivalent</label>
+              <select id="cfg-baud-rate">
+                <option value="115200" selected>115200 bps</option>
+                <option value="9600">9600 bps</option>
+                <option value="57600">57600 bps</option>
+              </select>
+            </div>
+            <div class="form-group half">
+              <label for="cfg-auto-reconnect">Auto-Reconnect</label>
+              <select id="cfg-auto-reconnect">
+                <option value="true" selected>Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="settings-save-btn" class="btn btn-primary">Save Settings</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

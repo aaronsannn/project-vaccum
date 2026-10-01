@@ -1,0 +1,15 @@
+{
+  "name": "ingestive-particle-collector",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Web Bluetooth telemetry dashboard and control interface for ESP32 Ingestive Particle Collector",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.4.8"
+  }
+}
