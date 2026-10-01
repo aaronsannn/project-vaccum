@@ -71,40 +71,40 @@
     <main class="dashboard-grid">
       <!-- Top Metric Cards -->
       <section class="metrics-row">
-        <!-- Metric 1: Real-time Circuit Resistance -->
+        <!-- Metric 1: Real-time Circuit Resistance & Baseline -->
         <div class="card metric-card">
           <div class="metric-header">
-            <span class="metric-title">Collector Resistance</span>
-            <span class="metric-badge" id="resistance-rate-badge">+0.0 Ω/s</span>
+            <span class="metric-title">Measured Resistance</span>
+            <span class="metric-badge" id="calib-status-badge">Uncalibrated</span>
           </div>
           <div class="metric-value-container">
             <span class="metric-value text-accent" id="val-resistance">0.0</span>
             <span class="metric-unit">Ω</span>
           </div>
           <div class="metric-subtext">
-            <div class="progress-bar-bg" style="margin-top: 6px; height: 6px;">
+            Empty Baseline: <span id="val-baseline-resistance" class="font-mono">-- Ω</span>
+          </div>
+        </div>
+
+        <!-- Metric 2: Resistance Shift (Delta from Baseline) & Threshold -->
+        <div class="card metric-card">
+          <div class="metric-header">
+            <span class="metric-title">Resistance Shift (ΔR)</span>
+            <span class="metric-tag info" id="threshold-status-tag">Target: 1,000 Ω</span>
+          </div>
+          <div class="metric-value-container">
+            <span class="metric-value" id="val-shift">0.0</span>
+            <span class="metric-unit">Ω Shift</span>
+          </div>
+          <div class="metric-subtext">
+            <div class="progress-bar-bg" style="margin-top: 4px; height: 6px;">
               <div class="progress-bar-fill fill-cyan" id="resistance-threshold-bar" style="width: 0%"></div>
             </div>
             <div style="display:flex; justify-content:space-between; margin-top:4px;">
               <span>0 Ω</span>
-              <span id="resistance-pct-label">0% of Cutoff</span>
+              <span id="resistance-pct-label">0% of 1k Cutoff</span>
               <span id="resistance-threshold-sublabel">1,000 Ω</span>
             </div>
-          </div>
-        </div>
-
-        <!-- Metric 2: Autonomous Threshold Cutoff -->
-        <div class="card metric-card">
-          <div class="metric-header">
-            <span class="metric-title">Cutoff Threshold</span>
-            <span class="metric-tag info" id="threshold-status-tag">Auto-End Target</span>
-          </div>
-          <div class="metric-value-container">
-            <span class="metric-value" id="val-threshold">1,000</span>
-            <span class="metric-unit">Ω (1 kΩ)</span>
-          </div>
-          <div class="metric-subtext">
-            Remaining margin: <span id="val-remaining-margin" class="font-mono">1,000.0 Ω</span>
           </div>
         </div>
 

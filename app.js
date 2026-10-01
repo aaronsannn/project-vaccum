@@ -28,12 +28,15 @@ const state = {
   isSensing: false,          // Sensing Execution (START/STOP)
   vacuumLevel: 1,            // Vacuum suction level (1 to 5)
   currentResistance: 0.0,    // Measured circuit resistance in Ohms
-  resistanceThreshold: 1000.0, // Cutoff threshold in Ohms (1 kΩ)
+  baselineResistance: 0.0,   // Empty baseline resistance in Ohms
+  totalShift: 0.0,           // Shift from baseline (|R - R_base|)
+  resistanceThreshold: 1000.0, // Shift cutoff threshold in Ohms (1 kΩ)
+  isCalibrated: false,       // True when empty baseline is locked
   ledState: 'OFF',           // 'OFF' | 'GREEN' | 'RED'
   taskCompleted: false,
 
   // Historical Telemetry for Chart & CSV Export
-  history: [], // { timestamp, timeStr, res, threshold, vac, isSensing, systemPower, led }
+  history: [], // { timestamp, timeStr, res, base, shift, threshold, vac, isSensing, systemPower, led }
   maxHistoryPoints: 240,
 
   // Timers
@@ -58,13 +61,13 @@ const ui = {
 
   // Metrics
   valResistance: document.getElementById('val-resistance'),
-  resistanceRateBadge: document.getElementById('resistance-rate-badge'),
+  valBaselineResistance: document.getElementById('val-baseline-resistance'),
+  valShift: document.getElementById('val-shift'),
+  calibStatusBadge: document.getElementById('calib-status-badge'),
   resistanceThresholdBar: document.getElementById('resistance-threshold-bar'),
   resistancePctLabel: document.getElementById('resistance-pct-label'),
   resistanceThresholdSublabel: document.getElementById('resistance-threshold-sublabel'),
   thresholdStatusTag: document.getElementById('threshold-status-tag'),
-  valThreshold: document.getElementById('val-threshold'),
-  valRemainingMargin: document.getElementById('val-remaining-margin'),
   vacStatusTag: document.getElementById('vac-status-tag'),
   valVacuumLevel: document.getElementById('val-vacuum-level'),
   valVacuumPwm: document.getElementById('val-vacuum-pwm'),
@@ -396,8 +399,11 @@ function updateLedUI(led) {
 // --- Reset / Tare Cycle ---
 function resetTaskCycle() {
   state.currentResistance = 0.0;
+  state.baselineResistance = 0.0;
+  state.totalShift = 0.0;
+  state.isCalibrated = false;
   state.taskCompleted = false;
-  updateResistanceMetrics(0.0);
+  updateResistanceMetrics(0.0, 0.0, 0.0, false);
 
   if (state.systemPower) {
     updateLedUI('OFF');
@@ -406,11 +412,11 @@ function resetTaskCycle() {
   }
 
   sendCommand('TARE');
-  appendLog('SYS', 'Cycle reset: Baseline resistance zeroed.', 'sys');
+  appendLog('SYS', 'Cycle reset: Baseline resistance recalibration primed.', 'sys');
 }
 
 // --- Telemetry Processing & Autonomous Threshold Cutoff ---
-function applyTelemetryData({ res, thresh, led, power, sensing, vac }) {
+function applyTelemetryData({ res, base, shift, thresh, led, power, sensing, calib, vac }) {
   if (power !== undefined && power !== state.systemPower) {
     updatePowerUI(Boolean(power));
   }
@@ -421,29 +427,35 @@ function applyTelemetryData({ res, thresh, led, power, sensing, vac }) {
 
   if (thresh !== undefined && thresh !== state.resistanceThreshold) {
     state.resistanceThreshold = Number(thresh);
-    ui.valThreshold.textContent = Number(thresh).toLocaleString();
     ui.resistanceThresholdSublabel.textContent = `${Number(thresh).toLocaleString()} Ω`;
+  }
+
+  if (calib !== undefined) {
+    state.isCalibrated = Boolean(calib);
+  }
+
+  if (base !== undefined) {
+    state.baselineResistance = parseFloat(base);
+  }
+
+  if (shift !== undefined) {
+    state.totalShift = parseFloat(shift);
   }
 
   if (res !== undefined) {
     const numRes = parseFloat(res);
     state.currentResistance = numRes;
-    updateResistanceMetrics(numRes);
 
-    // Calculate Rate (Ω / sec)
-    const nowTime = Date.now();
-    const dt = (nowTime - state.lastRateCalcTime) / 1000;
-    if (dt >= 0.5) {
-      const dR = numRes - state.lastResistanceVal;
-      const rate = dt > 0 ? (dR / dt).toFixed(1) : '0.0';
-      ui.resistanceRateBadge.textContent = `${rate >= 0 ? '+' : ''}${rate} Ω/s`;
-      state.lastResistanceVal = numRes;
-      state.lastRateCalcTime = nowTime;
+    // If shift is not explicitly supplied, calculate shift from baseline
+    if (shift === undefined && state.isCalibrated && state.baselineResistance > 0) {
+      state.totalShift = Math.abs(numRes - state.baselineResistance);
     }
 
+    updateResistanceMetrics(numRes, state.baselineResistance, state.totalShift, state.isCalibrated);
+
     // --- AUTONOMOUS CUTOFF CHECK ---
-    // Formula determines resistance is over threshold (default 1k ohms)
-    if (numRes >= state.resistanceThreshold) {
+    // Trigger if totalShift exceeds the 1,000 Ohm threshold
+    if (state.totalShift >= state.resistanceThreshold) {
       if (!state.taskCompleted) {
         state.taskCompleted = true;
 
@@ -457,12 +469,12 @@ function applyTelemetryData({ res, thresh, led, power, sensing, vac }) {
           stopSessionTimer();
         }
 
-        ui.valDeviceState.textContent = 'TASK COMPLETED (CUTOFF)';
+        ui.valDeviceState.textContent = 'EXTRACTION COMPLETE';
         ui.valDeviceState.className = 'metric-tag alert';
-        ui.thresholdStatusTag.textContent = 'THRESHOLD REACHED';
+        ui.thresholdStatusTag.textContent = 'CUTOFF TRIGGERED';
         ui.thresholdStatusTag.className = 'metric-tag alert';
 
-        appendLog('WARN', `🚨 AUTONOMOUS THRESHOLD REACHED: Resistance ${numRes.toFixed(1)} Ω exceeds cutoff target (${state.resistanceThreshold} Ω). Task completed! Lights switched to RED.`, 'warn');
+        appendLog('WARN', `🚨 EXTRACTION COMPLETE: Massive resistance shift detected (ΔR = ${state.totalShift.toFixed(1)} Ω ≥ ${state.resistanceThreshold} Ω). Switched lights to RED.`, 'warn');
       }
     } else {
       if (state.isSensing && !state.taskCompleted) {
@@ -491,6 +503,8 @@ function applyTelemetryData({ res, thresh, led, power, sensing, vac }) {
     timestamp: now.getTime(),
     timeStr: timeStr,
     res: state.currentResistance,
+    base: state.baselineResistance,
+    shift: state.totalShift,
     threshold: state.resistanceThreshold,
     vac: state.vacuumLevel,
     isSensing: state.isSensing,
@@ -503,23 +517,34 @@ function applyTelemetryData({ res, thresh, led, power, sensing, vac }) {
   }
 }
 
-function updateResistanceMetrics(res) {
-  ui.valResistance.textContent = res.toFixed(1);
+function updateResistanceMetrics(res, base, shift, calib) {
+  ui.valResistance.textContent = res > 0 ? res.toFixed(1) : '0.0';
 
-  const pct = Math.min(100, Math.max(0, (res / state.resistanceThreshold) * 100));
+  if (calib && base > 0) {
+    ui.valBaselineResistance.textContent = `${base.toFixed(1)} Ω`;
+    ui.calibStatusBadge.textContent = 'Baseline Locked';
+    ui.calibStatusBadge.style.color = 'var(--accent-emerald)';
+    ui.calibStatusBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
+  } else {
+    ui.valBaselineResistance.textContent = '-- Ω';
+    ui.calibStatusBadge.textContent = 'Uncalibrated';
+    ui.calibStatusBadge.style.color = 'var(--text-dim)';
+    ui.calibStatusBadge.style.borderColor = 'var(--border-color)';
+  }
+
+  ui.valShift.textContent = shift > 0 ? `+${shift.toFixed(1)}` : '0.0';
+
+  const pct = Math.min(100, Math.max(0, (shift / state.resistanceThreshold) * 100));
   ui.resistanceThresholdBar.style.width = `${pct}%`;
-  ui.resistancePctLabel.textContent = `${pct.toFixed(0)}% of Cutoff`;
+  ui.resistancePctLabel.textContent = `${pct.toFixed(0)}% of 1k Cutoff`;
 
   if (pct >= 100) {
     ui.resistanceThresholdBar.className = 'progress-bar-fill fill-rose';
-    ui.valResistance.className = 'metric-value text-alert';
+    ui.valShift.className = 'metric-value text-alert';
   } else {
     ui.resistanceThresholdBar.className = 'progress-bar-fill fill-cyan';
-    ui.valResistance.className = 'metric-value text-accent';
+    ui.valShift.className = 'metric-value text-accent';
   }
-
-  const remaining = Math.max(0, state.resistanceThreshold - res);
-  ui.valRemainingMargin.textContent = `${remaining.toFixed(1)} Ω`;
 }
 
 // --- Web Bluetooth API Connection ---
@@ -732,36 +757,53 @@ function toggleDemoMode() {
     // Automatically power on in simulation for instant feedback
     updatePowerUI(true);
 
-    let simResistance = 180.0; // Start at baseline resistance
+    let simBase = 2400.0;
+    let simShift = 0.0;
+    let simCalibrated = false;
+
     state.simInterval = setInterval(() => {
       if (!state.isSimulating) return;
 
       if (state.systemPower && state.isSensing && !state.taskCompleted) {
-        // Resistance increases as vacuum pulls particles onto the collector
-        // Higher vacuum level = faster particle deposition rate!
-        const depositionSpeed = state.vacuumLevel * 14.0; // Ω per sec
-        const noise = (Math.random() - 0.45) * 5.0;
-        simResistance += (depositionSpeed * 0.25) + noise;
+        if (!simCalibrated) {
+          simCalibrated = true;
+          simBase = 2380.0 + (Math.random() - 0.5) * 40.0;
+          simShift = 0.0;
+          appendLog('RX', `Empty Baseline Locked At: ${simBase.toFixed(1)} Ω`, 'rx');
+        } else {
+          // Accumulation rate proportional to vacuum level 1-5
+          const depositRate = state.vacuumLevel * 18.0; // Ω / sec
+          const noise = (Math.random() - 0.45) * 6.0;
+          simShift += (depositRate * 0.25) + noise;
+          if (simShift < 0) simShift = 0;
+        }
 
-        if (simResistance < 50) simResistance = 50;
+        const simCurrent = simBase + simShift;
 
         applyTelemetryData({
-          res: simResistance,
+          res: simCurrent,
+          base: simBase,
+          shift: simShift,
           thresh: state.resistanceThreshold,
           vac: state.vacuumLevel,
           power: true,
           sensing: true,
-          led: simResistance >= state.resistanceThreshold ? 'RED' : 'GREEN'
+          calib: simCalibrated,
+          led: simShift >= state.resistanceThreshold ? 'RED' : 'GREEN'
         });
       } else {
-        // Idling baseline with gentle thermal drift
-        const idleNoise = (Math.random() - 0.5) * 0.4;
+        // Idle state
+        simCalibrated = false;
+        simShift = 0.0;
         applyTelemetryData({
-          res: Math.max(0, simResistance + idleNoise),
+          res: simBase + (Math.random() - 0.5) * 2.0,
+          base: state.baselineResistance,
+          shift: state.totalShift,
           thresh: state.resistanceThreshold,
           vac: state.vacuumLevel,
           power: state.systemPower,
           sensing: state.isSensing,
+          calib: state.isCalibrated,
           led: state.taskCompleted ? 'RED' : (state.isSensing ? 'GREEN' : 'OFF')
         });
       }
@@ -981,14 +1023,14 @@ function exportCsv() {
     return;
   }
 
-  let csv = 'Timestamp,Time,Resistance_Ohms,Threshold_Ohms,VacuumLevel,SensingActive,SystemPower,LedState\n';
+  let csv = 'Timestamp,Time,CurrentResistance_Ohms,BaselineResistance_Ohms,ShiftDelta_Ohms,CutoffThreshold_Ohms,VacuumLevel,ExtractionActive,SystemPower,LedState\n';
   state.history.forEach(p => {
-    csv += `${p.timestamp},${p.timeStr},${p.res},${p.threshold},${p.vac},${p.isSensing ? 1 : 0},${p.systemPower ? 1 : 0},${p.led}\n`;
+    csv += `${p.timestamp},${p.timeStr},${p.res},${p.base || 0},${p.shift || 0},${p.threshold},${p.vac},${p.isSensing ? 1 : 0},${p.systemPower ? 1 : 0},${p.led}\n`;
   });
 
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   downloadBlob(blob, `particle_collector_resistance_${Date.now()}.csv`);
-  appendLog('SYS', 'Resistance telemetry session exported to CSV.', 'sys');
+  appendLog('SYS', 'Resistance shift telemetry session exported to CSV.', 'sys');
 }
 
 function exportJson() {
