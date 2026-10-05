@@ -111,10 +111,15 @@ void setup() {
   digitalWrite(powerPin, HIGH); // System power ON
   digitalWrite(levelMeterPin, LOW);
 
-  // Configure Vacuum Motor PWM
+  // Configure Vacuum Motor PWM (Supports ESP32 Core v3.x and v2.x)
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+  ledcAttach(vacuumPin, VAC_PWM_FREQ, VAC_PWM_RESOLUTION);
+  ledcWrite(vacuumPin, 0);
+#else
   ledcSetup(VAC_PWM_CHANNEL, VAC_PWM_FREQ, VAC_PWM_RESOLUTION);
   ledcAttachPin(vacuumPin, VAC_PWM_CHANNEL);
   ledcWrite(VAC_PWM_CHANNEL, 0);
+#endif
 
   // Initialize Web Bluetooth BLE
   BLEDevice::init(DEVICE_NAME);
@@ -249,6 +254,15 @@ void stopExtraction(bool completed) {
   sendBleTelemetry();
 }
 
+// --- Helper for PWM compatibility across ESP32 Core versions ---
+void setVacuumPwm(int duty) {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+  ledcWrite(vacuumPin, duty);
+#else
+  ledcWrite(VAC_PWM_CHANNEL, duty);
+#endif
+}
+
 // --- Output Actuator Controller ---
 void updateHardwareOutputs() {
   digitalWrite(powerPin, systemPowered ? HIGH : LOW);
@@ -257,7 +271,7 @@ void updateHardwareOutputs() {
     digitalWrite(greenLED, LOW);
     digitalWrite(redLED, LOW);
     digitalWrite(levelMeterPin, LOW);
-    ledcWrite(VAC_PWM_CHANNEL, 0);
+    setVacuumPwm(0);
     ledState = "OFF";
     return;
   }
@@ -279,9 +293,9 @@ void updateHardwareOutputs() {
   // Vacuum Motor: Runs during active extraction
   if (systemActive) {
     int duty = (vacuumLevel * 255) / 5; // 20% to 100% duty cycle
-    ledcWrite(VAC_PWM_CHANNEL, duty);
+    setVacuumPwm(duty);
   } else {
-    ledcWrite(VAC_PWM_CHANNEL, 0);
+    setVacuumPwm(0);
   }
 }
 
