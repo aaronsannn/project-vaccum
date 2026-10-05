@@ -21,11 +21,13 @@
 #define DEVICE_NAME "ParticleCollector-ESP32"
 
 // --- Pin Definitions ---
-const int analogPin = 34; // Measurement wire (ADC)
-const int greenLED  = 21; // Status: Ready / Extracting
-const int redLED    = 22; // Status: Complete
-const int buttonPin = 25; // Physical Start / Stop Button
-const int vacuumPin = 23; // Vacuum motor PWM drive (Levels 1-5)
+const int analogPin     = 34; // Measurement wire (ADC)
+const int greenLED      = 21; // Status: Ready / Extracting
+const int redLED        = 22; // Status: Complete
+const int buttonPin     = 25; // Physical Start / Stop Button
+const int powerPin      = 33; // D33: Controls ON / OFF Power State
+const int levelMeterPin = 26; // D26: Controls Level Meter (1-5 indicator)
+const int vacuumPin     = 23; // Vacuum motor PWM drive (Levels 1-5)
 
 // PWM Channel configuration (LEDC)
 #define VAC_PWM_CHANNEL     0
@@ -101,9 +103,13 @@ void setup() {
   pinMode(greenLED, OUTPUT);
   pinMode(redLED, OUTPUT);
   pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(powerPin, OUTPUT);
+  pinMode(levelMeterPin, OUTPUT);
 
   digitalWrite(greenLED, LOW);
   digitalWrite(redLED, LOW);
+  digitalWrite(powerPin, HIGH); // System power ON
+  digitalWrite(levelMeterPin, LOW);
 
   // Configure Vacuum Motor PWM
   ledcSetup(VAC_PWM_CHANNEL, VAC_PWM_FREQ, VAC_PWM_RESOLUTION);
@@ -245,13 +251,19 @@ void stopExtraction(bool completed) {
 
 // --- Output Actuator Controller ---
 void updateHardwareOutputs() {
+  digitalWrite(powerPin, systemPowered ? HIGH : LOW);
+
   if (!systemPowered) {
     digitalWrite(greenLED, LOW);
     digitalWrite(redLED, LOW);
+    digitalWrite(levelMeterPin, LOW);
     ledcWrite(VAC_PWM_CHANNEL, 0);
     ledState = "OFF";
     return;
   }
+
+  // Level meter indicator
+  digitalWrite(levelMeterPin, (vacuumLevel > 0 && systemActive) ? HIGH : LOW);
 
   if (ledState == "GREEN") {
     digitalWrite(greenLED, HIGH);
