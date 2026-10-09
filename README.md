@@ -87,21 +87,27 @@ ingestive-particle-collector/
 
 | ESP32 Pin | Component | Description |
 | :--- | :--- | :--- |
-| **GPIO 18** | Green LED | Active during sensing ($R < 1\text{ k}\Omega$) |
-| **GPIO 19** | Red LED | Active when threshold reached ($R \ge 1\text{ k}\Omega$) |
-| **GPIO 23** | Vacuum Motor (PWM / MOSFET) | 5 kHz PWM speed control (Levels 1-5) |
-| **GPIO 34** | Voltage Divider ADC | Collector circuit resistance sensor |
+| **GPIO 34** | Voltage Divider ADC | Collector circuit resistance sensor (10k fixed anchor to GND) |
+| **GPIO 21** | Green LED | Active during sensing ($R < 1\text{ k}\Omega$ shift) |
+| **GPIO 22** | Red LED | Active when threshold reached ($\Delta R \ge 1\text{ k}\Omega$) |
+| **GPIO 25** | Physical Button | Manual Start / Emergency Stop trigger (`INPUT_PULLUP`) |
+| **GPIO 33** | Main Power Relay/Gate | D33: Main Hardware Power Output (`HIGH` = ON, `LOW` = OFF) |
+| **GPIO 26** | Level Meter (1-5) | D26: PWM Level Indicator (20% to 100% duty matching Levels 1-5) |
+| **GPIO 23** | Vacuum Motor | 5 kHz PWM speed control (Levels 1 to 5) |
 
 ---
 
-## 📡 BLE Commands Reference
+## 📡 Serial & BLE Commands Reference
+
+Both **Arduino IDE Serial Monitor / Web Serial (115200 baud)** and **Nordic UART Web Bluetooth** accept the following commands:
 
 | Command | Action |
 | :--- | :--- |
-| `POWER:ON` | Turn on main system hardware |
-| `POWER:OFF` | Turn off main system hardware |
-| `SENSE:START` | Engage vacuum and begin sensing resistance |
-| `SENSE:STOP` | Halt sensing and vacuum motor |
-| `VAC:1` ... `VAC:5` | Set vacuum power level (20% to 100% duty) |
-| `TARE` | Zero baseline resistance and reset cycle |
-| `SET_THRESH:<val>` | Set custom resistance cutoff threshold (default 1000) |
+| `POWER:ON` or `ON` | Turn on main system hardware (D33 HIGH) |
+| `POWER:OFF` or `OFF` | Turn off main system hardware (D33 LOW, halts motor) |
+| `SENSE:START` or `START` | Engage vacuum and start monitoring resistance shift |
+| `SENSE:STOP` or `STOP` | Halt sensing and vacuum motor |
+| `VAC:1` ... `VAC:5` | Set vacuum power level (20% to 100% PWM on GPIO 23 & GPIO 26) |
+| `TARE` | Zero baseline resistance to current measured value |
+| `SET_THRESH:<val>` | Set custom resistance cutoff threshold (default 1000 Ω) |
+| `STATUS` | Request full JSON telemetry broadcast |

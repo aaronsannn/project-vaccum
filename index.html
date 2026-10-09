@@ -50,12 +50,21 @@
           <span id="demo-toggle-label">Start Simulation</span>
         </button>
 
+        <!-- Web Serial (USB Cable) Connect button -->
+        <button id="serial-connect-btn" class="btn btn-secondary" title="Connect to ESP32 over USB Serial Port (115200 baud)">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
+            <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
+          </svg>
+          <span id="serial-connect-label">Connect USB Serial</span>
+        </button>
+
         <!-- BLE Connect button -->
         <button id="ble-connect-btn" class="btn btn-primary">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
             <path d="m7 7 10 10-5 5V2l5 5L7 17" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
-          <span>Connect ESP32</span>
+          <span id="ble-connect-label">Connect Bluetooth</span>
         </button>
 
         <button id="settings-open-btn" class="btn btn-icon" title="BLE & Resistance Threshold Settings">
@@ -102,7 +111,7 @@
             </div>
             <div style="display:flex; justify-content:space-between; margin-top:4px;">
               <span>0 Ω</span>
-              <span id="resistance-pct-label">0% of 1k Cutoff</span>
+              <span id="resistance-pct-label">0% of 1k Alert</span>
               <span id="resistance-threshold-sublabel">1,000 Ω</span>
             </div>
           </div>
@@ -199,6 +208,22 @@
               </div>
             </div>
 
+            <!-- Main Hardware Power Control Section -->
+            <div class="twin-section">
+              <div class="section-heading-row">
+                <span class="section-heading">Main Unit Power</span>
+                <span class="power-status-badge powered-on" id="main-power-badge">POWER ON</span>
+              </div>
+              <div class="main-power-buttons-row">
+                <button id="main-power-on-btn" class="btn-power active" title="Send POWER:ON command to ESP32">
+                  <span class="power-status-dot on"></span> TURN POWER ON
+                </button>
+                <button id="main-power-off-btn" class="btn-power" title="Send POWER:OFF command to ESP32">
+                  <span class="power-status-dot off"></span> TURN POWER OFF
+                </button>
+              </div>
+            </div>
+
             <!-- Vacuum Power Level Selector (Levels 1 to 5) -->
             <div class="twin-section">
               <div class="section-heading-row">
@@ -206,16 +231,33 @@
                 <span class="vacuum-level-badge" id="vac-selector-badge">Level 1</span>
               </div>
               <div class="vacuum-buttons-row">
-                <button class="vac-btn active" data-level="1">1</button>
-                <button class="vac-btn" data-level="2">2</button>
-                <button class="vac-btn" data-level="3">3</button>
-                <button class="vac-btn" data-level="4">4</button>
-                <button class="vac-btn" data-level="5">5</button>
+                <button class="vac-btn active" data-level="1" id="vac-btn-1">1</button>
+                <button class="vac-btn" data-level="2" id="vac-btn-2">2</button>
+                <button class="vac-btn" data-level="3" id="vac-btn-3">3</button>
+                <button class="vac-btn" data-level="4" id="vac-btn-4">4</button>
+                <button class="vac-btn" data-level="5" id="vac-btn-5">5</button>
               </div>
               <div class="vacuum-scale-labels">
                 <span>Low (Level 1)</span>
                 <span>Medium (Level 3)</span>
                 <span>Max Suction (Level 5)</span>
+              </div>
+              <!-- Meter Calibration & Nudge Controls -->
+              <div class="vacuum-calib-row">
+                <button id="vac-calib-btn" class="btn btn-sm btn-calib" title="Synchronize current physical meter state to Level 1 base">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"/>
+                    <circle cx="12" cy="12" r="6"/>
+                    <circle cx="12" cy="12" r="2"/>
+                  </svg>
+                  <span>Set 1 as Base (Calibrate)</span>
+                </button>
+                <button id="vac-step-btn" class="btn btn-sm btn-ghost" title="Pulse Pin 26 once to advance physical meter by +1 step">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                  <span>Step +1</span>
+                </button>
               </div>
             </div>
 
@@ -271,9 +313,13 @@
           <button class="cmd-pill" data-cmd="POWER:OFF">🔌 POWER_OFF</button>
           <button class="cmd-pill" data-cmd="SENSE:START">▶ SENSE_START</button>
           <button class="cmd-pill" data-cmd="SENSE:STOP">⏹ SENSE_STOP</button>
-          <button class="cmd-pill" data-cmd="VAC:1">💨 VAC_LEVEL_1</button>
-          <button class="cmd-pill" data-cmd="VAC:3">💨 VAC_LEVEL_3</button>
-          <button class="cmd-pill" data-cmd="VAC:5">💨 VAC_LEVEL_5</button>
+          <button class="cmd-pill" data-cmd="CALIB:1">🎯 SET_1_AS_BASE</button>
+          <button class="cmd-pill" data-cmd="VAC:STEP">⚡ STEP_+1</button>
+          <button class="cmd-pill" data-cmd="VAC:1">💨 VAC_1</button>
+          <button class="cmd-pill" data-cmd="VAC:2">💨 VAC_2</button>
+          <button class="cmd-pill" data-cmd="VAC:3">💨 VAC_3</button>
+          <button class="cmd-pill" data-cmd="VAC:4">💨 VAC_4</button>
+          <button class="cmd-pill" data-cmd="VAC:5">💨 VAC_5</button>
           <button class="cmd-pill" data-cmd="TARE">⚖ TARE_RESISTANCE</button>
           <button class="cmd-pill" data-cmd="STATUS">ℹ GET_STATUS</button>
         </div>

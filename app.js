@@ -1,8 +1,9 @@
 /**
  * Ingestive Particle Collector - Autonomous Resistance Telemetry & Vacuum Controller
- * Web Bluetooth GATT controller for ESP32.
- * Tracks circuit resistance over time, mirrors physical Green/Red LEDs, controls vacuum levels (1-5),
- * and handles autonomous task termination when resistance exceeds 1,000 Ohms.
+ * Dual Controller: Web Bluetooth (BLE UART) & Web Serial (USB COM at 115200 baud).
+ * Continuously tracks circuit resistance, incorporating baseline (~3.8k - 4.0k Ohms)
+ * with noise rejection, mirrors physical LEDs, controls vacuum levels (1-5), and triggers
+ * autonomous 1k-Ohm cutoff.
  */
 
 // Application State
@@ -13,9 +14,16 @@ const state = {
   rxCharacteristic: null,
   txCharacteristic: null,
   isConnected: false,
+
+  // Web Serial (USB) Connection
+  serialPort: null,
+  serialReader: null,
+  serialWriter: null,
+  isSerialConnected: false,
+  serialKeepReading: false,
+
   isSimulating: false,
   isChartPaused: false,
-  autoReconnect: true,
 
   // Settings
   serviceUuid: '6e400001-b5a3-f393-e0a9-e50e24dcca9e',
@@ -24,15 +32,15 @@ const state = {
   namePrefix: 'Particle',
 
   // Core Telemetry & Hardware State
-  systemPower: false,        // Main Unit Power (ON/OFF)
-  isSensing: false,          // Sensing Execution (START/STOP)
-  vacuumLevel: 1,            // Vacuum suction level (1 to 5)
-  currentResistance: 0.0,    // Measured circuit resistance in Ohms
-  baselineResistance: 0.0,   // Empty baseline resistance in Ohms
-  totalShift: 0.0,           // Shift from baseline (|R - R_base|)
-  resistanceThreshold: 1000.0, // Shift cutoff threshold in Ohms (1 kΩ)
-  isCalibrated: false,       // True when empty baseline is locked
-  ledState: 'OFF',           // 'OFF' | 'GREEN' | 'RED'
+  systemPower: true,          // Main Unit Power (Defaults to ON like ESP32)
+  isSensing: false,           // Sensing Execution (START/STOP)
+  vacuumLevel: 1,             // Vacuum suction level (1 to 5)
+  currentResistance: 3900.0,  // Measured circuit resistance in Ohms (nominal ~3.9k)
+  baselineResistance: 3900.0, // Empty baseline resistance in Ohms
+  totalShift: 0.0,            // Shift from baseline (|R - R_base|)
+  resistanceThreshold: 1000.0,// Shift cutoff threshold in Ohms (1 kΩ)
+  isCalibrated: false,        // True when baseline is locked
+  ledState: 'OFF',            // 'OFF' | 'GREEN' | 'RED'
   taskCompleted: false,
 
   // Historical Telemetry for Chart & CSV Export
@@ -43,8 +51,6 @@ const state = {
   sessionStartTime: null,
   timerInterval: null,
   simInterval: null,
-  lastResistanceVal: 0.0,
-  lastRateCalcTime: Date.now()
 };
 
 // DOM Elements
@@ -57,6 +63,9 @@ const ui = {
   demoModeToggle: document.getElementById('demo-mode-toggle'),
   demoToggleLabel: document.getElementById('demo-toggle-label'),
   bleConnectBtn: document.getElementById('ble-connect-btn'),
+  bleConnectLabel: document.getElementById('ble-connect-label'),
+  serialConnectBtn: document.getElementById('serial-connect-btn'),
+  serialConnectLabel: document.getElementById('serial-connect-label'),
   settingsOpenBtn: document.getElementById('settings-open-btn'),
 
   // Metrics
@@ -83,9 +92,16 @@ const ui = {
   ledRedBulb: document.getElementById('led-red-bulb'),
   ledRedState: document.getElementById('led-red-state'),
 
+  // Main Hardware Power Controls (in twin deck)
+  mainPowerBadge: document.getElementById('main-power-badge'),
+  mainPowerOnBtn: document.getElementById('main-power-on-btn'),
+  mainPowerOffBtn: document.getElementById('main-power-off-btn'),
+
   // Vacuum selector buttons
   vacSelectorBadge: document.getElementById('vac-selector-badge'),
   vacButtons: document.querySelectorAll('.vac-btn'),
+  vacCalibBtn: document.getElementById('vac-calib-btn'),
+  vacStepBtn: document.getElementById('vac-step-btn'),
 
   // Sensing execution controls
   sensingToggleBtn: document.getElementById('sensing-toggle-btn'),
@@ -123,7 +139,7 @@ const ui = {
 const ctx = ui.canvas.getContext('2d');
 let animationFrameId = null;
 
-// --- Initialize App ---
+// --- Initialize Application ---
 function init() {
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
@@ -131,14 +147,15 @@ function init() {
   setupEventListeners();
   startChartRenderLoop();
 
-  // Initial UI state
-  updatePowerUI(false);
+  // Initial UI state (System defaults to POWER ON like ESP32)
+  updatePowerUI(true);
   updateSensingUI(false);
   updateLedUI('OFF');
   updateVacuumUI(1);
-  updateResistanceMetrics(0.0);
+  updateResistanceMetrics(3900.0, 3900.0, 0.0, false);
 
-  appendLog('SYS', 'System initialized. Nordic UART Service BLE configured.', 'sys');
+  appendLog('SYS', 'Ingestive Particle Collector Dashboard ready.', 'sys');
+  appendLog('SYS', 'Dual interface supported: Connect via Web Bluetooth or USB Serial (115200 baud).', 'sys');
 }
 
 // --- Responsive Canvas Setup ---
@@ -152,8 +169,16 @@ function resizeCanvas() {
 
 // --- Event Listeners Setup ---
 function setupEventListeners() {
-  // Main System Power Toggle
-  ui.systemPowerToggle.addEventListener('click', toggleSystemPower);
+  // Main System Power Controls (Top Bar & Main Deck)
+  if (ui.systemPowerToggle) {
+    ui.systemPowerToggle.addEventListener('click', () => setSystemPower(!state.systemPower));
+  }
+  if (ui.mainPowerOnBtn) {
+    ui.mainPowerOnBtn.addEventListener('click', () => setSystemPower(true));
+  }
+  if (ui.mainPowerOffBtn) {
+    ui.mainPowerOffBtn.addEventListener('click', () => setSystemPower(false));
+  }
 
   // Sensing Button (Start / Stop)
   ui.sensingToggleBtn.addEventListener('click', toggleSensing);
@@ -169,6 +194,20 @@ function setupEventListeners() {
     });
   });
 
+  // Vacuum Calibration Button (Sets 1 as Base)
+  if (ui.vacCalibBtn) {
+    ui.vacCalibBtn.addEventListener('click', () => {
+      calibrateVacuumBase(1);
+    });
+  }
+
+  // Vacuum Step Button (Nudges +1 pulse)
+  if (ui.vacStepBtn) {
+    ui.vacStepBtn.addEventListener('click', () => {
+      stepVacuumMeter();
+    });
+  }
+
   // Web Bluetooth Connect Button
   ui.bleConnectBtn.addEventListener('click', () => {
     if (state.isConnected) {
@@ -177,6 +216,17 @@ function setupEventListeners() {
       connectBle();
     }
   });
+
+  // Web Serial (USB) Connect Button
+  if (ui.serialConnectBtn) {
+    ui.serialConnectBtn.addEventListener('click', () => {
+      if (state.isSerialConnected) {
+        disconnectSerial();
+      } else {
+        connectSerial();
+      }
+    });
+  }
 
   // Demo / Simulation Mode Toggle
   ui.demoModeToggle.addEventListener('click', toggleDemoMode);
@@ -210,6 +260,7 @@ function setupEventListeners() {
   ui.exportCsvBtn.addEventListener('click', exportCsv);
   ui.exportJsonBtn.addEventListener('click', exportJson);
 
+  // Quick Action Buttons
   ui.quickCmdButtons.forEach(btn => {
     btn.addEventListener('click', () => {
       const cmd = btn.getAttribute('data-cmd');
@@ -235,7 +286,6 @@ function setupEventListeners() {
     const newThresh = parseFloat(ui.cfgThreshold.value);
     if (!isNaN(newThresh) && newThresh > 0) {
       state.resistanceThreshold = newThresh;
-      ui.valThreshold.textContent = newThresh.toLocaleString();
       ui.resistanceThresholdSublabel.textContent = `${newThresh.toLocaleString()} Ω`;
       sendCommand(`SET_THRESH:${newThresh}`);
     }
@@ -250,38 +300,52 @@ function setupEventListeners() {
 }
 
 // --- System Power Control ---
-function toggleSystemPower() {
-  const newPower = !state.systemPower;
-  updatePowerUI(newPower);
+function setSystemPower(powered) {
+  if (state.systemPower === powered) return;
+  state.systemPower = powered;
+  updatePowerUI(powered);
 
   // Send hardware command
-  sendCommand(newPower ? 'POWER:ON' : 'POWER:OFF');
+  sendCommand(powered ? 'POWER:ON' : 'POWER:OFF');
 
-  if (!newPower && state.isSensing) {
-    // Turning power off automatically halts sensing
-    stopSensing();
+  if (!powered) {
+    appendLog('PWR', 'Sent POWER:OFF command. ESP32 entering Deep Sleep (Low Power Mode). Wake with PCB Pin 33 button.', 'warn');
+    if (state.isSensing) {
+      stopSensing();
+    }
   }
 }
 
 function updatePowerUI(powered) {
   state.systemPower = powered;
-  if (powered) {
-    ui.systemPowerToggle.className = 'power-toggle-btn powered-on';
-    ui.powerToggleText.textContent = 'ON';
-    ui.valPowerIndicator.textContent = 'ON';
-    ui.valPowerIndicator.style.color = 'var(--accent-emerald)';
-    if (!state.isSensing && !state.taskCompleted) {
-      ui.valDeviceState.textContent = 'STANDBY';
-      ui.valDeviceState.className = 'metric-tag';
-    }
-  } else {
-    ui.systemPowerToggle.className = 'power-toggle-btn powered-off';
-    ui.powerToggleText.textContent = 'OFF';
-    ui.valPowerIndicator.textContent = 'OFF';
-    ui.valPowerIndicator.style.color = 'var(--accent-rose)';
+
+  // Header Toggle Button
+  if (ui.systemPowerToggle) {
+    ui.systemPowerToggle.className = powered ? 'power-toggle-btn powered-on' : 'power-toggle-btn powered-off';
+    ui.powerToggleText.textContent = powered ? 'ON' : 'OFF';
+  }
+
+  // Twin Control Deck Buttons
+  if (ui.mainPowerBadge) {
+    ui.mainPowerBadge.className = powered ? 'power-status-badge powered-on' : 'power-status-badge powered-off';
+    ui.mainPowerBadge.textContent = powered ? 'POWER ON' : 'POWER OFF';
+  }
+  if (ui.mainPowerOnBtn && ui.mainPowerOffBtn) {
+    ui.mainPowerOnBtn.classList.toggle('active', powered);
+    ui.mainPowerOffBtn.classList.toggle('active', !powered);
+  }
+
+  // Metric tag
+  ui.valPowerIndicator.textContent = powered ? 'ON' : 'OFF';
+  ui.valPowerIndicator.style.color = powered ? 'var(--accent-emerald)' : 'var(--accent-rose)';
+
+  if (!powered) {
     ui.valDeviceState.textContent = 'POWER OFF';
     ui.valDeviceState.className = 'metric-tag';
     updateLedUI('OFF');
+  } else if (!state.isSensing && !state.taskCompleted) {
+    ui.valDeviceState.textContent = 'STANDBY';
+    ui.valDeviceState.className = 'metric-tag';
   }
 }
 
@@ -298,7 +362,9 @@ function setVacuumLevel(level) {
 function updateVacuumUI(level) {
   state.vacuumLevel = level;
   ui.valVacuumLevel.textContent = level;
-  ui.vacSelectorBadge.textContent = `Level ${level}`;
+  if (ui.vacSelectorBadge) {
+    ui.vacSelectorBadge.textContent = `Level ${level}`;
+  }
 
   // Duty cycle percentage calculation (20% to 100%)
   const duty = level * 20;
@@ -308,20 +374,32 @@ function updateVacuumUI(level) {
   // Update button active state
   ui.vacButtons.forEach(btn => {
     const btnLevel = parseInt(btn.getAttribute('data-level'), 10);
-    if (btnLevel === level) {
-      btn.classList.add('active');
-    } else {
-      btn.classList.remove('active');
-    }
+    btn.classList.toggle('active', btnLevel === level);
   });
+}
+
+// Synchronize current physical meter state to Base Level 1 without pulsing Pin 26
+function calibrateVacuumBase(calLevel = 1) {
+  state.vacuumLevel = calLevel;
+  updateVacuumUI(calLevel);
+  sendCommand(`CALIB:${calLevel}`);
+  appendLog('CALIB', `Vacuum meter synchronized: Physical meter calibrated to Base Level ${calLevel}.`, 'sys');
+}
+
+// Nudge / pulse physical meter forward by +1 step
+function stepVacuumMeter() {
+  const nextLevel = (state.vacuumLevel % 5) + 1;
+  state.vacuumLevel = nextLevel;
+  updateVacuumUI(nextLevel);
+  sendCommand('VAC:STEP');
+  appendLog('STEP', `Pulsed meter Pin 26: advanced to Level ${nextLevel}.`, 'tx');
 }
 
 // --- Sensing Execution (Start / Stop) ---
 function toggleSensing() {
+  // If power is currently OFF, automatically turn it ON and start sensing
   if (!state.systemPower) {
-    alert('Please turn SYSTEM POWER ON before starting sensing.');
-    appendLog('WARN', 'Cannot start sensing: System Power is OFF.', 'warn');
-    return;
+    setSystemPower(true);
   }
 
   if (state.isSensing) {
@@ -334,7 +412,6 @@ function toggleSensing() {
 }
 
 function startSensing() {
-  if (!state.systemPower) return;
   state.isSensing = true;
   state.taskCompleted = false;
 
@@ -342,7 +419,7 @@ function startSensing() {
   updateLedUI('GREEN'); // Switch lights to GREEN upon sensing start
   startSessionTimer();
 
-  appendLog('SYS', `Sensing task started at Vacuum Level ${state.vacuumLevel}. Cutoff threshold: ${state.resistanceThreshold} Ω.`, 'sys');
+  appendLog('SYS', `Sensing task started at Vacuum Level ${state.vacuumLevel}. Cutoff target: ${state.resistanceThreshold} Ω shift.`, 'sys');
 }
 
 function stopSensing() {
@@ -388,44 +465,52 @@ function updateLedUI(led) {
   if (led === 'GREEN') {
     ui.ledGreenBulb.classList.add('active');
     ui.ledGreenUnit.classList.add('active-unit', 'active-green');
-    ui.ledGreenState.textContent = 'LIT (NORMAL)';
+    ui.ledGreenState.textContent = 'LIT (SENSING)';
   } else if (led === 'RED') {
     ui.ledRedBulb.classList.add('active');
     ui.ledRedUnit.classList.add('active-unit', 'active-red');
-    ui.ledRedState.textContent = 'LIT (THRESHOLD)';
+    ui.ledRedState.textContent = 'LIT (CUTOFF REACHED)';
   }
 }
 
 // --- Reset / Tare Cycle ---
 function resetTaskCycle() {
-  state.currentResistance = 0.0;
-  state.baselineResistance = 0.0;
   state.totalShift = 0.0;
-  state.isCalibrated = false;
   state.taskCompleted = false;
-  updateResistanceMetrics(0.0, 0.0, 0.0, false);
+
+  // Lock baseline to current resistance if valid
+  if (state.currentResistance > 10.0) {
+    state.baselineResistance = state.currentResistance;
+    state.isCalibrated = true;
+  } else {
+    state.isCalibrated = false;
+  }
+
+  updateResistanceMetrics(state.currentResistance, state.baselineResistance, 0.0, state.isCalibrated);
 
   if (state.systemPower) {
     updateLedUI('OFF');
     ui.valDeviceState.textContent = 'STANDBY';
     ui.valDeviceState.className = 'metric-tag';
+    ui.thresholdStatusTag.textContent = `Target: ${state.resistanceThreshold.toLocaleString()} Ω`;
+    ui.thresholdStatusTag.className = 'metric-tag info';
   }
 
   sendCommand('TARE');
-  appendLog('SYS', 'Cycle reset: Baseline resistance recalibration primed.', 'sys');
+  appendLog('SYS', `Baseline tared at ${state.baselineResistance.toFixed(1)} Ω. Resistance shift zeroed.`, 'sys');
 }
 
 // --- Telemetry Processing & Autonomous Threshold Cutoff ---
 function applyTelemetryData({ res, base, shift, thresh, led, power, sensing, calib, vac }) {
-  if (power !== undefined && power !== state.systemPower) {
+  if (power !== undefined && Boolean(power) !== state.systemPower) {
     updatePowerUI(Boolean(power));
   }
 
-  if (vac !== undefined && vac !== state.vacuumLevel) {
+  if (vac !== undefined && Number(vac) !== state.vacuumLevel) {
     updateVacuumUI(Number(vac));
   }
 
-  if (thresh !== undefined && thresh !== state.resistanceThreshold) {
+  if (thresh !== undefined && Number(thresh) !== state.resistanceThreshold) {
     state.resistanceThreshold = Number(thresh);
     ui.resistanceThresholdSublabel.textContent = `${Number(thresh).toLocaleString()} Ω`;
   }
@@ -434,27 +519,26 @@ function applyTelemetryData({ res, base, shift, thresh, led, power, sensing, cal
     state.isCalibrated = Boolean(calib);
   }
 
-  if (base !== undefined) {
+  if (base !== undefined && parseFloat(base) > 0) {
     state.baselineResistance = parseFloat(base);
-  }
-
-  if (shift !== undefined) {
-    state.totalShift = parseFloat(shift);
   }
 
   if (res !== undefined) {
     const numRes = parseFloat(res);
     state.currentResistance = numRes;
 
-    // If shift is not explicitly supplied, calculate shift from baseline
-    if (shift === undefined && state.isCalibrated && state.baselineResistance > 0) {
-      state.totalShift = Math.abs(numRes - state.baselineResistance);
+    // Use reported shift or calculate shift from baseline
+    if (shift !== undefined) {
+      state.totalShift = parseFloat(shift);
+    } else if (state.isCalibrated && state.baselineResistance > 0) {
+      const rawDelta = Math.abs(numRes - state.baselineResistance);
+      // Small jumps under 150 Ohms are treated as baseline stability (not a shift)
+      state.totalShift = rawDelta < 150.0 ? 0.0 : rawDelta;
     }
 
     updateResistanceMetrics(numRes, state.baselineResistance, state.totalShift, state.isCalibrated);
 
-    // --- AUTONOMOUS CUTOFF CHECK ---
-    // Trigger if totalShift exceeds the 1,000 Ohm threshold
+    // --- 1K THRESHOLD: EXTRACTION COMPLETE (Keeps monitoring until manual button press!) ---
     if (state.totalShift >= state.resistanceThreshold) {
       if (!state.taskCompleted) {
         state.taskCompleted = true;
@@ -462,19 +546,12 @@ function applyTelemetryData({ res, base, shift, thresh, led, power, sensing, cal
         // Switch physical & virtual LED from GREEN to RED
         updateLedUI('RED');
 
-        // Automatically end the sensing task
-        if (state.isSensing) {
-          state.isSensing = false;
-          updateSensingUI(false);
-          stopSessionTimer();
-        }
-
         ui.valDeviceState.textContent = 'EXTRACTION COMPLETE';
         ui.valDeviceState.className = 'metric-tag alert';
-        ui.thresholdStatusTag.textContent = 'CUTOFF TRIGGERED';
+        ui.thresholdStatusTag.textContent = 'EXTRACTION COMPLETE (≥1kΩ)';
         ui.thresholdStatusTag.className = 'metric-tag alert';
 
-        appendLog('WARN', `🚨 EXTRACTION COMPLETE: Massive resistance shift detected (ΔR = ${state.totalShift.toFixed(1)} Ω ≥ ${state.resistanceThreshold} Ω). Switched lights to RED.`, 'warn');
+        appendLog('WARN', `Extraction Complete! (ΔR = ${state.totalShift.toFixed(1)} Ω). Switched lights to RED. Continuous post-extraction monitoring active.`, 'warn');
       }
     } else {
       if (state.isSensing && !state.taskCompleted) {
@@ -483,7 +560,7 @@ function applyTelemetryData({ res, base, shift, thresh, led, power, sensing, cal
     }
   }
 
-  // If explicit LED state broadcasted from ESP32
+  // Explicit LED state broadcast from ESP32
   if (led && typeof led === 'string') {
     const upper = led.toUpperCase();
     if (upper === 'RED' || upper === 'GREEN' || upper === 'OFF') {
@@ -496,7 +573,7 @@ function applyTelemetryData({ res, base, shift, thresh, led, power, sensing, cal
     updateSensingUI(state.isSensing);
   }
 
-  // Store in historical record for graph & CSV export
+  // Historical record for chart and data export
   const now = new Date();
   const timeStr = now.toTimeString().split(' ')[0];
   state.history.push({
@@ -518,11 +595,13 @@ function applyTelemetryData({ res, base, shift, thresh, led, power, sensing, cal
 }
 
 function updateResistanceMetrics(res, base, shift, calib) {
-  ui.valResistance.textContent = res > 0 ? res.toFixed(1) : '0.0';
+  // Format resistance nicely in Ohms or kOhms
+  ui.valResistance.textContent = res >= 1000 ? `${(res / 1000).toFixed(2)}k` : res.toFixed(1);
 
-  if (calib && base > 0) {
-    ui.valBaselineResistance.textContent = `${base.toFixed(1)} Ω`;
-    ui.calibStatusBadge.textContent = 'Baseline Locked';
+  if (base > 0) {
+    const baseText = base >= 1000 ? `${(base / 1000).toFixed(2)} kΩ` : `${base.toFixed(1)} Ω`;
+    ui.valBaselineResistance.textContent = baseText;
+    ui.calibStatusBadge.textContent = calib ? 'Baseline Locked' : 'Tracking Baseline';
     ui.calibStatusBadge.style.color = 'var(--accent-emerald)';
     ui.calibStatusBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
   } else {
@@ -536,7 +615,7 @@ function updateResistanceMetrics(res, base, shift, calib) {
 
   const pct = Math.min(100, Math.max(0, (shift / state.resistanceThreshold) * 100));
   ui.resistanceThresholdBar.style.width = `${pct}%`;
-  ui.resistancePctLabel.textContent = `${pct.toFixed(0)}% of 1k Cutoff`;
+  ui.resistancePctLabel.textContent = `${pct.toFixed(0)}% of Cutoff`;
 
   if (pct >= 100) {
     ui.resistanceThresholdBar.className = 'progress-bar-fill fill-rose';
@@ -547,7 +626,118 @@ function updateResistanceMetrics(res, base, shift, calib) {
   }
 }
 
-// --- Web Bluetooth API Connection ---
+// =========================================================================
+//  WEB SERIAL API (USB CABLE at 115200 Baud)
+// =========================================================================
+async function connectSerial() {
+  if (!navigator.serial) {
+    alert('Web Serial API is not supported in this browser. Please use Google Chrome or Microsoft Edge on Desktop.');
+    appendLog('ERR', 'Web Serial API not supported in this browser.', 'err');
+    return;
+  }
+
+  try {
+    appendLog('SYS', 'Requesting USB Serial port at 115200 baud...', 'sys');
+    state.serialPort = await navigator.serial.requestPort();
+    await state.serialPort.open({ baudRate: 115200 });
+
+    state.isSerialConnected = true;
+    state.serialKeepReading = true;
+
+    // Get Serial Writer
+    state.serialWriter = state.serialPort.writable.getWriter();
+
+    updateSerialConnectionUI(true);
+    appendLog('SYS', 'USB Serial connected successfully at 115200 baud!', 'sys');
+
+    // Start reading stream
+    readSerialLoop();
+
+  } catch (err) {
+    appendLog('ERR', `Serial connection failed: ${err.message}`, 'err');
+    disconnectSerial();
+  }
+}
+
+async function readSerialLoop() {
+  let textDecoder = new TextDecoderStream();
+  let readableStreamClosed = state.serialPort.readable.pipeTo(textDecoder.writable);
+  let reader = textDecoder.readable.getReader();
+  state.serialReader = reader;
+
+  let buffer = '';
+
+  try {
+    while (state.serialKeepReading) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        buffer += value;
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Retain incomplete trailing line
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed) {
+            processIncomingLine(trimmed);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    appendLog('WARN', `Serial read error: ${err.message}`, 'warn');
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function disconnectSerial() {
+  state.serialKeepReading = false;
+  state.isSerialConnected = false;
+
+  try {
+    if (state.serialReader) {
+      await state.serialReader.cancel();
+      state.serialReader = null;
+    }
+    if (state.serialWriter) {
+      await state.serialWriter.close();
+      state.serialWriter = null;
+    }
+    if (state.serialPort) {
+      await state.serialPort.close();
+      state.serialPort = null;
+    }
+  } catch (e) {
+    // Ignore close errors
+  }
+
+  updateSerialConnectionUI(false);
+  appendLog('WARN', 'USB Serial disconnected.', 'warn');
+}
+
+function updateSerialConnectionUI(connected) {
+  if (connected) {
+    if (ui.serialConnectBtn) {
+      ui.serialConnectBtn.classList.add('connected');
+      if (ui.serialConnectLabel) ui.serialConnectLabel.textContent = 'Disconnect USB';
+    }
+    ui.connectionStatusPill.className = 'connection-status connected';
+    ui.connectionStatusText.textContent = 'USB Serial Connected (115200)';
+  } else {
+    if (ui.serialConnectBtn) {
+      ui.serialConnectBtn.classList.remove('connected');
+      if (ui.serialConnectLabel) ui.serialConnectLabel.textContent = 'Connect USB Serial';
+    }
+    if (!state.isConnected) {
+      ui.connectionStatusPill.className = 'connection-status disconnected';
+      ui.connectionStatusText.textContent = 'Disconnected';
+    }
+  }
+}
+
+// =========================================================================
+//  WEB BLUETOOTH API (Nordic UART Service)
+// =========================================================================
 async function connectBle() {
   if (!navigator.bluetooth) {
     alert('Web Bluetooth API is not supported in this browser. Please use Google Chrome, Microsoft Edge, or Opera.');
@@ -556,7 +746,7 @@ async function connectBle() {
   }
 
   try {
-    appendLog('SYS', 'Requesting Web Bluetooth device scan...', 'sys');
+    appendLog('SYS', 'Scanning for BLE Particle Collector...', 'sys');
     const serviceUuid = state.serviceUuid;
 
     const options = {
@@ -570,16 +760,12 @@ async function connectBle() {
     }
 
     state.device = await navigator.bluetooth.requestDevice(options);
-    appendLog('SYS', `Selected device: ${state.device.name || 'ESP32 Collector'} (ID: ${state.device.id})`, 'sys');
+    appendLog('SYS', `Selected device: ${state.device.name || 'ESP32 Collector'}`, 'sys');
 
-    state.device.addEventListener('gattserverdisconnected', onDisconnected);
+    state.device.addEventListener('gattserverdisconnected', onDisconnectedBle);
 
     // Connect to GATT
-    appendLog('SYS', 'Connecting to GATT Server...', 'sys');
     state.server = await state.device.gatt.connect();
-
-    // Get Primary Nordic UART Service
-    appendLog('SYS', `Getting Primary Service: ${serviceUuid}`, 'sys');
     const service = await state.server.getPrimaryService(serviceUuid);
 
     // Get RX Notification Characteristic
@@ -595,108 +781,163 @@ async function connectBle() {
     // Get TX Command Write Characteristic
     try {
       state.txCharacteristic = await service.getCharacteristic(state.txUuid);
-      appendLog('SYS', 'Obtained TX characteristic for firmware commands.', 'sys');
+      appendLog('SYS', 'Obtained TX characteristic for commands.', 'sys');
     } catch (err) {
       appendLog('WARN', `TX Characteristic not found: ${err.message}`, 'warn');
     }
 
     state.isConnected = true;
-    updateConnectionUI('connected', state.device.name || 'ESP32 Connected');
-    appendLog('SYS', 'ESP32 Particle Collector connected successfully!', 'sys');
+    updateBleConnectionUI('connected', state.device.name || 'ESP32 Bluetooth Connected');
+    appendLog('SYS', 'ESP32 Bluetooth connected successfully!', 'sys');
 
   } catch (error) {
     appendLog('ERR', `BLE Connection failed: ${error.message}`, 'err');
-    updateConnectionUI('disconnected', 'Disconnected');
+    updateBleConnectionUI('disconnected', 'Disconnected');
   }
 }
 
-function updateConnectionUI(status, label) {
-  ui.connectionStatusPill.className = `connection-status ${status}`;
-  ui.connectionStatusText.textContent = label;
-
+function updateBleConnectionUI(status, label) {
   if (status === 'connected') {
     ui.bleConnectBtn.classList.add('connected');
-    ui.bleConnectBtn.innerHTML = `
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M18 6 6 18M6 6l12 12" />
-      </svg>
-      <span>Disconnect</span>
-    `;
+    if (ui.bleConnectLabel) ui.bleConnectLabel.textContent = 'Disconnect BLE';
+    ui.connectionStatusPill.className = 'connection-status connected';
+    ui.connectionStatusText.textContent = label;
   } else {
     ui.bleConnectBtn.classList.remove('connected');
-    ui.bleConnectBtn.innerHTML = `
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="m7 7 10 10-5 5V2l5 5L7 17" stroke-linecap="round" stroke-linejoin="round" />
-      </svg>
-      <span>Connect ESP32</span>
-    `;
+    if (ui.bleConnectLabel) ui.bleConnectLabel.textContent = 'Connect Bluetooth';
+    if (!state.isSerialConnected) {
+      ui.connectionStatusPill.className = 'connection-status disconnected';
+      ui.connectionStatusText.textContent = 'Disconnected';
+    }
   }
 }
 
 function disconnectBle() {
   if (state.device && state.device.gatt.connected) {
-    appendLog('SYS', 'Disconnecting from ESP32...', 'sys');
     state.device.gatt.disconnect();
   }
-  onDisconnected();
+  onDisconnectedBle();
 }
 
-function onDisconnected() {
+function onDisconnectedBle() {
   state.isConnected = false;
   state.server = null;
   state.rxCharacteristic = null;
   state.txCharacteristic = null;
-  updateConnectionUI('disconnected', 'Disconnected');
+  updateBleConnectionUI('disconnected', 'Disconnected');
   appendLog('WARN', 'ESP32 Bluetooth connection terminated.', 'warn');
 }
 
-// --- Transmit Commands to ESP32 Firmware ---
+// --- Transmit Commands to ESP32 Firmware (Serial & BLE) ---
 async function sendCommand(commandText) {
   const trimmed = commandText.trim();
   if (!trimmed) return;
 
   appendLog('TX', trimmed, 'tx');
 
+  // 1. Send via USB Serial if connected
+  if (state.isSerialConnected && state.serialWriter) {
+    try {
+      const encoder = new TextEncoder();
+      await state.serialWriter.write(encoder.encode(trimmed + '\n'));
+    } catch (err) {
+      appendLog('ERR', `Serial TX Error: ${err.message}`, 'err');
+    }
+  }
+
+  // 2. Send via Web Bluetooth if connected
   if (state.isConnected && state.txCharacteristic) {
     try {
       const encoder = new TextEncoder();
-      const data = encoder.encode(trimmed + '\n');
-      await state.txCharacteristic.writeValue(data);
+      await state.txCharacteristic.writeValue(encoder.encode(trimmed + '\n'));
     } catch (err) {
-      appendLog('ERR', `Write error: ${err.message}`, 'err');
+      appendLog('ERR', `BLE TX Error: ${err.message}`, 'err');
     }
-  } else if (state.isSimulating) {
+  }
+
+  // 3. Handle in Simulation Mode
+  if (state.isSimulating) {
     setTimeout(() => {
       handleSimulatedCommand(trimmed);
-    }, 120);
-  } else {
-    // If not connected and not simulating
-    if (!trimmed.startsWith('STATUS')) {
-      appendLog('WARN', 'Command queued locally (connect ESP32 or enable Simulation Mode to execute).', 'warn');
-    }
+    }, 80);
+  } else if (!state.isConnected && !state.isSerialConnected && !trimmed.startsWith('STATUS')) {
+    appendLog('WARN', `Command '${trimmed}' executed locally. (Connect USB Serial or Bluetooth to send to physical board).`, 'warn');
   }
 }
 
 // --- Handle Incoming BLE Data Stream ---
-let rxBuffer = '';
+let bleRxBuffer = '';
 function handleIncomingBleData(event) {
   const value = event.target.value;
   const decoder = new TextDecoder('utf-8');
   const chunk = decoder.decode(value);
 
-  rxBuffer += chunk;
-  const lines = rxBuffer.split('\n');
-  rxBuffer = lines.pop(); // Retain incomplete trailing fragment
+  bleRxBuffer += chunk;
+  const lines = bleRxBuffer.split('\n');
+  bleRxBuffer = lines.pop();
 
   for (const line of lines) {
     const trimmed = line.trim();
-    if (!trimmed) continue;
-    processIncomingLine(trimmed);
+    if (trimmed) processIncomingLine(trimmed);
   }
 }
 
+// --- Parse Incoming Telemetry Lines (Both Serial and BLE) ---
 function processIncomingLine(line) {
-  appendLog('RX', line, 'rx');
+  // Ignore raw status log prints from firmware to keep terminal clean
+  if (line.startsWith('[STATUS]')) {
+    appendLog('ESP32', line, 'rx');
+    return;
+  }
+  // Check for System Started and Emergency Stop messages
+  if (line.includes('System Started! Extracting')) {
+    if (!state.isSensing) startSensing();
+    appendLog('ESP32', line, 'rx');
+    return;
+  }
+  // Check for Deep Sleep and Wakeup messages
+  if (line.includes('Entering Deep Sleep') || line.includes('Deep Sleep active')) {
+    updatePowerUI(false);
+    appendLog('ESP32', line, 'warn');
+    return;
+  }
+  if (line.includes('Woke up from Deep Sleep')) {
+    updatePowerUI(true);
+    appendLog('ESP32', line, 'sys');
+    return;
+  }
+  if (line.includes('Empty Baseline Locked At:')) {
+    const baseMatch = line.match(/Empty Baseline Locked At:\s*([\d\.]+)/i);
+    if (baseMatch) {
+      state.baselineResistance = parseFloat(baseMatch[1]);
+      state.isCalibrated = true;
+      updateResistanceMetrics(state.currentResistance, state.baselineResistance, 0.0, true);
+    }
+    appendLog('ESP32', line, 'rx');
+    return;
+  }
+
+  // Parse Vacuum Meter Level format: "Vacuum Meter Level: 3" or "Vacuum Meter Calibrated to Base Level: 1"
+  const vacMatch = line.match(/(?:Vacuum\s+(?:Meter\s+)?(?:Calibrated\s+to\s+Base\s+)?Level|VAC)\s*[:=]\s*(\d+)/i);
+  if (vacMatch) {
+    const lvl = parseInt(vacMatch[1], 10);
+    if (lvl >= 1 && lvl <= 5) {
+      updateVacuumUI(lvl);
+      appendLog('ESP32', line, 'rx');
+      return;
+    }
+  }
+
+  // Parse concise format: "Current Resistance (Ohms): 4740.82" or "Current Resistance: 3912.4"
+  const matchCurrentRes = line.match(/(?:Current\s+)?Resistance(?:\s*\([^\)]*\))?\s*:\s*([\d\.]+)/i);
+  if (matchCurrentRes) {
+    const rVal = parseFloat(matchCurrentRes[1]);
+    if (!isNaN(rVal)) {
+      applyTelemetryData({ res: rVal });
+      appendLog('ESP32', line, 'rx');
+      return;
+    }
+  }
 
   // Try parsing JSON telemetry packet
   if (line.startsWith('{') && line.endsWith('}')) {
@@ -705,11 +946,11 @@ function processIncomingLine(line) {
       applyTelemetryData(data);
       return;
     } catch (e) {
-      // not JSON, fallback to comma/key-value
+      // not JSON, fallback to key-value
     }
   }
 
-  // Key-value parsing (e.g. R:845.2,VAC:3,LED:GREEN)
+  // Key-value parsing (e.g. R:3920.5,VAC:3,LED:GREEN)
   if (line.includes(':')) {
     const parts = line.split(',');
     const parsed = {};
@@ -717,6 +958,8 @@ function processIncomingLine(line) {
       const [k, v] = part.split(':').map(s => s.trim());
       if (k && v) {
         if (k.match(/^r(es(istance)?)?$/i)) parsed.res = parseFloat(v);
+        if (k.match(/^b(ase)?$/i)) parsed.base = parseFloat(v);
+        if (k.match(/^s(hift)?$/i)) parsed.shift = parseFloat(v);
         if (k.match(/^t(hresh(old)?)?$/i)) parsed.thresh = parseFloat(v);
         if (k.match(/^v(ac(uum)?)?$/i)) parsed.vac = parseInt(v, 10);
         if (k.match(/^led$/i)) parsed.led = v.toUpperCase();
@@ -730,19 +973,7 @@ function processIncomingLine(line) {
     }
   }
 
-  // Raw CSV line fallback (e.g. "842.5,1000,3,GREEN")
-  if (line.includes(',')) {
-    const parts = line.split(',').map(s => s.trim());
-    const resVal = parseFloat(parts[0]);
-    if (!isNaN(resVal)) {
-      applyTelemetryData({
-        res: resVal,
-        thresh: parts[1] ? parseFloat(parts[1]) : state.resistanceThreshold,
-        vac: parts[2] ? parseInt(parts[2], 10) : state.vacuumLevel,
-        led: parts[3] ? parts[3].toUpperCase() : undefined
-      });
-    }
-  }
+  appendLog('RX', line, 'rx');
 }
 
 // --- Realistic Hardware Simulation Mode ---
@@ -752,31 +983,24 @@ function toggleDemoMode() {
   if (state.isSimulating) {
     ui.demoModeToggle.classList.add('sim-active');
     ui.demoToggleLabel.textContent = 'Stop Simulation';
-    appendLog('SYS', 'Hardware Simulation Mode ENABLED. Powering ON simulated ESP32.', 'sys');
+    appendLog('SYS', 'Simulation Mode ENABLED. Powering ON simulated ESP32.', 'sys');
 
-    // Automatically power on in simulation for instant feedback
     updatePowerUI(true);
 
-    let simBase = 2400.0;
+    // Realistic baseline: ~3900 Ohms (3.8k to 4.0k)
+    let simBase = 3920.0;
     let simShift = 0.0;
-    let simCalibrated = false;
+    let simCalibrated = true;
 
     state.simInterval = setInterval(() => {
       if (!state.isSimulating) return;
 
       if (state.systemPower && state.isSensing && !state.taskCompleted) {
-        if (!simCalibrated) {
-          simCalibrated = true;
-          simBase = 2380.0 + (Math.random() - 0.5) * 40.0;
-          simShift = 0.0;
-          appendLog('RX', `Empty Baseline Locked At: ${simBase.toFixed(1)} Ω`, 'rx');
-        } else {
-          // Accumulation rate proportional to vacuum level 1-5
-          const depositRate = state.vacuumLevel * 18.0; // Ω / sec
-          const noise = (Math.random() - 0.45) * 6.0;
-          simShift += (depositRate * 0.25) + noise;
-          if (simShift < 0) simShift = 0;
-        }
+        // Accumulation rate proportional to vacuum level 1-5
+        const depositRate = state.vacuumLevel * 22.0; // Ω / sec
+        const noise = (Math.random() - 0.48) * 8.0;
+        simShift += (depositRate * 0.25) + noise;
+        if (simShift < 0) simShift = 0;
 
         const simCurrent = simBase + simShift;
 
@@ -792,18 +1016,17 @@ function toggleDemoMode() {
           led: simShift >= state.resistanceThreshold ? 'RED' : 'GREEN'
         });
       } else {
-        // Idle state
-        simCalibrated = false;
-        simShift = 0.0;
+        // Standby baseline with minor natural jitter (+/- 15 Ohms, shift remains 0)
+        const jitter = (Math.random() - 0.5) * 15.0;
         applyTelemetryData({
-          res: simBase + (Math.random() - 0.5) * 2.0,
-          base: state.baselineResistance,
-          shift: state.totalShift,
+          res: simBase + jitter,
+          base: simBase,
+          shift: 0.0,
           thresh: state.resistanceThreshold,
           vac: state.vacuumLevel,
           power: state.systemPower,
           sensing: state.isSensing,
-          calib: state.isCalibrated,
+          calib: simCalibrated,
           led: state.taskCompleted ? 'RED' : (state.isSensing ? 'GREEN' : 'OFF')
         });
       }
@@ -822,22 +1045,34 @@ function toggleDemoMode() {
 
 function handleSimulatedCommand(cmd) {
   const upper = cmd.toUpperCase();
-  if (upper === 'POWER:ON') {
+  if (upper === 'POWER:ON' || upper === 'ON') {
     updatePowerUI(true);
-    appendLog('RX', 'ACK: POWER:ON - Main ESP32 hardware powered.', 'rx');
-  } else if (upper === 'POWER:OFF') {
+    appendLog('RX', 'ACK: POWER:ON - Main hardware powered.', 'rx');
+  } else if (upper === 'POWER:OFF' || upper === 'OFF') {
     updatePowerUI(false);
     appendLog('RX', 'ACK: POWER:OFF - System powered down.', 'rx');
-  } else if (upper === 'SENSE:START') {
+  } else if (upper === 'SENSE:START' || upper === 'START') {
     startSensing();
-    appendLog('RX', `ACK: SENSE:START - Vacuum engaged at Level ${state.vacuumLevel}. Green LED ON.`, 'rx');
-  } else if (upper === 'SENSE:STOP') {
+    appendLog('RX', `ACK: SENSE:START - Vacuum running at Level ${state.vacuumLevel}. Green LED ON.`, 'rx');
+  } else if (upper === 'SENSE:STOP' || upper === 'STOP') {
     stopSensing();
     appendLog('RX', 'ACK: SENSE:STOP - Vacuum halted. Sensing standby.', 'rx');
+  } else if (upper.startsWith('CALIB') || upper.startsWith('SET:')) {
+    let calLvl = 1;
+    if (upper.includes(':')) calLvl = parseInt(upper.split(':')[1], 10) || 1;
+    if (calLvl < 1 || calLvl > 5) calLvl = 1;
+    updateVacuumUI(calLvl);
+    appendLog('RX', `ACK: CALIB - Vacuum calibrated to Base Level ${calLvl}.`, 'rx');
+  } else if (upper === 'VAC:STEP' || upper === 'STEP' || upper === 'TAP') {
+    let nextLvl = (state.vacuumLevel % 5) + 1;
+    updateVacuumUI(nextLvl);
+    appendLog('RX', `ACK: STEP - Vacuum stepped to Level ${nextLvl}.`, 'rx');
   } else if (upper.startsWith('VAC:')) {
     const lvl = parseInt(upper.split(':')[1], 10);
-    updateVacuumUI(lvl);
-    appendLog('RX', `ACK: VAC:${lvl} - Motor PWM duty adjusted to ${lvl * 20}%.`, 'rx');
+    if (lvl >= 1 && lvl <= 5) {
+      updateVacuumUI(lvl);
+      appendLog('RX', `ACK: VAC:${lvl} - Motor PWM duty adjusted to ${lvl * 20}%.`, 'rx');
+    }
   } else if (upper === 'TARE') {
     resetTaskCycle();
     appendLog('RX', 'ACK: TARE - Baseline circuit offset zeroed.', 'rx');
@@ -896,11 +1131,14 @@ function drawResistanceChart() {
   const chartH = height - paddingTop - paddingBottom;
 
   // Determine dynamic Y-axis maximum
-  let maxRes = state.resistanceThreshold * 1.25; // default scale slightly above cutoff
+  let maxRes = (state.baselineResistance + state.resistanceThreshold) * 1.25;
+  if (maxRes < 5500) maxRes = 5500;
+  let minRes = Math.max(0, state.baselineResistance - 500);
+
   for (const pt of state.history) {
     if (pt.res > maxRes) maxRes = pt.res * 1.15;
+    if (pt.res < minRes) minRes = Math.max(0, pt.res * 0.9);
   }
-  const minRes = 0;
 
   // Draw Horizontal Gridlines & Y-Axis Labels
   ctx.lineWidth = 1;
@@ -919,11 +1157,13 @@ function drawResistanceChart() {
     ctx.lineTo(paddingLeft + chartW, y);
     ctx.stroke();
 
-    ctx.fillText(`${Math.round(val)} Ω`, paddingLeft - 8, y + 3);
+    const label = val >= 1000 ? `${(val / 1000).toFixed(1)}k` : `${Math.round(val)} Ω`;
+    ctx.fillText(label, paddingLeft - 8, y + 3);
   }
 
-  // Draw Horizontal Autonomous Cutoff Threshold Line (e.g. 1000 Ω)
-  const threshY = paddingTop + chartH - ((state.resistanceThreshold - minRes) / (maxRes - minRes)) * chartH;
+  // Draw Horizontal Autonomous Cutoff Threshold Line (Baseline + 1,000 Ω)
+  const cutoffTarget = state.baselineResistance + state.resistanceThreshold;
+  const threshY = paddingTop + chartH - ((cutoffTarget - minRes) / (maxRes - minRes)) * chartH;
   if (threshY >= paddingTop && threshY <= paddingTop + chartH) {
     ctx.save();
     ctx.strokeStyle = '#f43f5e';
@@ -937,11 +1177,10 @@ function drawResistanceChart() {
     ctx.lineTo(paddingLeft + chartW, threshY);
     ctx.stroke();
 
-    // Threshold Marker Label
     ctx.fillStyle = '#fda4af';
     ctx.font = 'bold 10px "Outfit", sans-serif';
     ctx.textAlign = 'right';
-    ctx.fillText(`CUTOFF THRESHOLD: ${state.resistanceThreshold.toLocaleString()} Ω`, paddingLeft + chartW - 6, threshY - 6);
+    ctx.fillText(`CUTOFF TARGET: ${(cutoffTarget / 1000).toFixed(2)} kΩ (+${state.resistanceThreshold.toLocaleString()} Ω)`, paddingLeft + chartW - 6, threshY - 6);
     ctx.restore();
   }
 
@@ -953,11 +1192,10 @@ function drawResistanceChart() {
   ctx.stroke();
 
   if (state.history.length < 2) {
-    // Empty state prompt
     ctx.fillStyle = '#475569';
     ctx.font = '13px "Outfit", sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('Awaiting resistance telemetry stream... Click "Connect ESP32" or "Start Simulation"', paddingLeft + chartW / 2, paddingTop + chartH / 2);
+    ctx.fillText('Awaiting resistance telemetry stream... Connect USB Serial, Bluetooth, or Start Simulation', paddingLeft + chartW / 2, paddingTop + chartH / 2);
     return;
   }
 
@@ -985,7 +1223,7 @@ function drawResistanceChart() {
   }
   ctx.stroke();
 
-  // Gradient fill under the curve
+  // Gradient fill under curve
   ctx.lineTo(paddingLeft + chartW, paddingTop + chartH);
   ctx.lineTo(paddingLeft, paddingTop + chartH);
   ctx.closePath();
@@ -997,7 +1235,7 @@ function drawResistanceChart() {
   ctx.fill();
   ctx.restore();
 
-  // Draw Latest Value Pulse Dot
+  // Latest Value Pulse Dot
   const lastIndex = numPoints - 1;
   const lastPt = points[lastIndex];
   const lastX = paddingLeft + chartW;
@@ -1005,7 +1243,7 @@ function drawResistanceChart() {
   const lastY = paddingTop + chartH - (lastNormY * chartH);
 
   ctx.save();
-  const isOver = lastPt.res >= state.resistanceThreshold;
+  const isOver = state.totalShift >= state.resistanceThreshold;
   ctx.fillStyle = isOver ? '#f43f5e' : '#06b6d4';
   ctx.shadowColor = isOver ? '#f43f5e' : '#06b6d4';
   ctx.shadowBlur = 14;
@@ -1041,7 +1279,7 @@ function exportJson() {
 
   const exportPayload = {
     sessionTimestamp: Date.now(),
-    device: state.device ? state.device.name : 'Simulated ESP32',
+    device: state.device ? state.device.name : (state.isSerialConnected ? 'ESP32 USB Serial' : 'Simulated ESP32'),
     configuration: {
       resistanceThreshold: state.resistanceThreshold,
       vacuumLevel: state.vacuumLevel,
@@ -1049,6 +1287,8 @@ function exportJson() {
     },
     finalState: {
       resistance: state.currentResistance,
+      baseline: state.baselineResistance,
+      shift: state.totalShift,
       taskCompleted: state.taskCompleted,
       ledState: state.ledState
     },
